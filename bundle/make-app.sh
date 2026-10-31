@@ -55,8 +55,11 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 echo "==> codesign (${SIGN_IDENTITY:-ad hoc})"
-codesign --force --sign "${SIGN_IDENTITY:--}" --options runtime --timestamp=none "$APP/Contents/Helpers/imagesmith"
-codesign --force --sign "${SIGN_IDENTITY:--}" --options runtime --timestamp=none "$APP"
+# Notarization requires a secure timestamp; ad hoc signatures can't have one.
+TIMESTAMP=--timestamp=none
+[ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != - ] && TIMESTAMP=--timestamp
+codesign --force --sign "${SIGN_IDENTITY:--}" --options runtime $TIMESTAMP "$APP/Contents/Helpers/imagesmith"
+codesign --force --sign "${SIGN_IDENTITY:--}" --options runtime $TIMESTAMP "$APP"
 codesign --verify --strict "$APP"
 
 if ((DMG)); then
@@ -68,6 +71,7 @@ if ((DMG)); then
     rm -f "$OUT"
     hdiutil create -volname ImageSmith -srcfolder "$STAGE" -ov -format UDZO "$OUT" >/dev/null
     rm -rf "$STAGE"
+    [ "$TIMESTAMP" = --timestamp ] && codesign --force --sign "$SIGN_IDENTITY" --timestamp "$OUT"
 fi
 
 echo "done: $APP"

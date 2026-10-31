@@ -36,5 +36,7 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT License</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>ImageSmith writes built images to SD cards and USB drives.</string>
 </dict>
 </plist>

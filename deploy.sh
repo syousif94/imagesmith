@@ -17,6 +17,17 @@ TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
 
 gh auth status >/dev/null 2>&1 || { echo "run 'gh auth login' first" >&2; exit 1; }
 
+export SIGN_IDENTITY=${SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)}
+if [ -z "$SIGN_IDENTITY" ]; then
+    echo "no 'Developer ID Application' certificate in the keychain (Xcode > Settings > Accounts > Manage Certificates)" >&2
+    exit 1
+fi
+NOTARY_PROFILE=${NOTARY_PROFILE:-imagesmith}
+if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+    echo "no notary credentials; run once: xcrun notarytool store-credentials $NOTARY_PROFILE" >&2
+    exit 1
+fi
+
 [ -d .git ] || git init -b main
 BRANCH=$(git symbolic-ref --short HEAD)
 
@@ -45,6 +56,10 @@ echo "==> build"
 bundle/make-app.sh --dmg
 DMG=$TARGET_DIR/release/ImageSmith.dmg
 cp "$TARGET_DIR/release/ImageSmith-$VERSION.dmg" "$DMG"
+
+echo "==> notarize"
+xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun stapler staple "$DMG"
 
 echo "==> release $TAG"
 if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then

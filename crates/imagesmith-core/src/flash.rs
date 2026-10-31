@@ -764,11 +764,23 @@ fn eject(device: &Path) {
     };
 }
 
+fn open_failed(node: &Path, what: &str, e: std::io::Error) -> Error {
+    // Root still gets EPERM when macOS privacy settings deny removable volumes to the app.
+    if cfg!(target_os = "macos") && e.raw_os_error() == Some(libc::EPERM) {
+        return Error::Other(format!(
+            "macOS blocked access to {}. Allow it in System Settings → Privacy & Security → Files & Folders → Removable Volumes (or Full Disk Access), then try again.",
+            node.display()
+        ));
+    }
+    Error::Other(format!("cannot open {} {what}: {e}", node.display()))
+}
+
 fn open_device_write(node: &Path) -> Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(node)
-        .map_err(|e| Error::Other(format!("cannot open {} for writing: {e}", node.display())))
+    std::fs::OpenOptions::new().write(true).open(node).map_err(|e| open_failed(node, "for writing", e))
+}
+
+fn open_device_read(node: &Path) -> Result<std::fs::File> {
+    std::fs::File::open(node).map_err(|e| open_failed(node, "to verify", e))
 }
 
 fn helper_run(source: &Path, device: &Path, verify: bool, do_eject: bool, cancel_file: Option<&Path>) -> Result<u64> {
@@ -843,7 +855,7 @@ fn helper_run(source: &Path, device: &Path, verify: bool, do_eject: bool, cancel
 
 /// SHA-256 of the first `total` bytes of the device.
 fn read_back(node: &Path, total: u64, cancel_file: Option<&Path>) -> Result<String> {
-    let mut f = std::fs::File::open(node).map_err(|e| Error::Other(format!("cannot reopen {} to verify: {e}", node.display())))?;
+    let mut f = open_device_read(node)?;
     f.seek(SeekFrom::Start(0))?;
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     let mut buf = vec![0u8; CHUNK];

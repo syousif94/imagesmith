@@ -183,6 +183,8 @@ pub struct ModelPicker {
     open: bool,
     query: Entity<TextInput>,
     width: f32,
+    /// Shows an OpenRouter / LM Studio switch atop the list.
+    show_provider: bool,
     _sub: Subscription,
 }
 
@@ -199,7 +201,12 @@ impl ModelPicker {
             }
             cx.notify();
         });
-        ModelPicker { open: false, query, width, _sub: sub }
+        ModelPicker { open: false, query, width, show_provider: false, _sub: sub }
+    }
+
+    pub fn with_provider_switch(mut self) -> Self {
+        self.show_provider = true;
+        self
     }
 
     fn filtered(&self, q: &str, cx: &App) -> Vec<ModelInfo> {
@@ -364,6 +371,17 @@ impl Render for ModelPicker {
                 this.open = false;
                 cx.notify();
             }))
+            .when(self.show_provider, |d| {
+                d.child(
+                    div().flex().p(px(6.)).pb_0().child(
+                        crate::widgets::segmented("picker-provider", &["OpenRouter", "LM Studio"], if lmstudio { 1 } else { 0 }, &c, |i, _, cx| {
+                            update_settings(cx, |s| s.ai_provider = [AiProvider::OpenRouter, AiProvider::LmStudio][i]);
+                            fetch_models(false, cx);
+                        })
+                        .flex_1(),
+                    ),
+                )
+            })
             .child(div().p(px(6.)).border_b_1().border_color(c.border).child(self.query.clone()))
             .child(div().id("model-list").flex_1().min_h_0().overflow_y_scroll().child(list))
             .child(

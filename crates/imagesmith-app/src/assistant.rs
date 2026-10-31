@@ -10,7 +10,7 @@ use crate::widgets::{button, tooltip, ClickIf, Kind};
 use crate::workspace::{OpenSettings, ProjectState, Workspace};
 use gpui::prelude::*;
 use gpui::{anchored, deferred, div, px, AnyElement, Context, Entity, Focusable, PromptLevel, ScrollHandle, Subscription, Window};
-use imagesmith_core::settings::AiProvider;
+use imagesmith_core::settings::{AiProvider, WebSearch};
 use imagesmith_core::validate::Severity;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -190,6 +190,7 @@ pub struct AssistantUi {
     pub open: bool,
     pub chats: HashMap<String, ProjectChats>,
     pub history_open: bool,
+    pub search_open: bool,
     /// Thinking boxes shown in full, keyed by (chat id, item index); usize::MAX is the live one.
     pub expanded: std::collections::HashSet<(u64, usize)>,
     think_scrolls: HashMap<(u64, usize), ScrollHandle>,
@@ -207,11 +208,12 @@ impl AssistantUi {
                 this.send_chat(cx);
             }
         });
-        let model_picker = cx.new(|cx| crate::model_picker::ModelPicker::new(320., cx));
+        let model_picker = cx.new(|cx| crate::model_picker::ModelPicker::new(320., cx).with_provider_switch());
         AssistantUi {
             open: false,
             chats: HashMap::new(),
             history_open: false,
+            search_open: false,
             expanded: Default::default(),
             think_scrolls: HashMap::new(),
             input,
@@ -1387,6 +1389,113 @@ impl Workspace {
             )
     }
 
+    fn render_search_menu(&mut self, c: &Colors, cx: &mut Context<Self>) -> gpui::Div {
+        let s = settings(cx);
+        let has = |k: &Option<String>| k.as_deref().is_some_and(|k| !k.trim().is_empty());
+        let options = [
+            (WebSearch::Off, "Off", None),
+            (WebSearch::LangSearch, "LangSearch", (!has(&s.langsearch_api_key)).then_some("API key needed")),
+            (WebSearch::OpenRouter, "OpenRouter", (!has(&s.openrouter_api_key)).then_some("API key needed")),
+        ];
+        let current = s.web_search;
+        let active = crate::web_search::backend(s).is_some();
+        let label = options.iter().find(|o| o.0 == current).map(|o| o.1).unwrap_or("Off");
+        let hover = c.hover;
+        let trigger = div()
+            .id("search-trigger")
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .h(px(24.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(c.border)
+            .bg(c.input_bg)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .tooltip(tooltip(match (current, active) {
+                (WebSearch::Off, _) => "Web search: off".to_string(),
+                (_, true) => format!("Web search: {label}"),
+                (_, false) => format!("Web search: {label} (API key needed in Settings)"),
+            }))
+            .child(div().text_size(px(12.)).when(!active, |d| d.text_color(c.muted)).child("Web"))
+            .child(div().text_size(px(10.)).text_color(c.muted).child("▾"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.assistant.search_open = !this.assistant.search_open;
+                cx.notify();
+            }));
+        let mut root = div().flex_none().child(trigger);
+        if !self.assistant.search_open {
+            return root;
+        }
+        let mut col = div().flex().flex_col().p(px(4.)).child(
+            div().px(px(8.)).py(px(4.)).text_size(px(11.)).text_color(c.muted).child("Web search"),
+        );
+        for (i, (mode, name, note)) in options.into_iter().enumerate() {
+            let sel = mode == current;
+            col = col.child(
+                div()
+                    .id(("search-opt", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(5.))
+                    .cursor_pointer()
+                    .when(sel, |d| d.bg(c.selected))
+                    .when(!sel, move |d| d.hover(move |s| s.bg(hover)))
+                    .child(div().flex_1().text_size(px(12.5)).child(name))
+                    .children(note.map(|n| div().text_size(px(10.5)).text_color(c.muted).child(n)))
+                    .when(sel, |d| d.child(div().text_color(c.accent).child("✓")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.assistant.search_open = false;
+                        crate::settings_window::update_settings(cx, |s| s.web_search = mode);
+                    })),
+            );
+        }
+        col = col.child(div().my(px(4.)).h(px(1.)).bg(c.border)).child(
+            div()
+                .id("search-settings")
+                .px(px(8.))
+                .py(px(5.))
+                .rounded(px(5.))
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .text_size(px(12.5))
+                .child("Settings…")
+                .on_click(cx.listener(|this, _, w, cx| {
+                    this.assistant.search_open = false;
+                    w.dispatch_action(Box::new(OpenSettings), cx);
+                })),
+        );
+        root = root.child(
+            deferred(
+                anchored().snap_to_window_with_margin(px(8.)).child(
+                    div()
+                        .id("search-menu")
+                        .occlude()
+                        .mt(px(4.))
+                        .w(px(220.))
+                        .rounded(px(8.))
+                        .bg(c.surface)
+                        .border_1()
+                        .border_color(c.border)
+                        .shadow_lg()
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.assistant.search_open = false;
+                            cx.notify();
+                        }))
+                        .child(col),
+                ),
+            )
+            .with_priority(3),
+        );
+        root
+    }
+
     pub fn render_assistant(&mut self, c: &Colors, cx: &mut Context<Self>) -> AnyElement {
         let s = settings(cx);
         let lmstudio = s.ai_provider == AiProvider::LmStudio;
@@ -1680,6 +1789,7 @@ impl Workspace {
             )
             .with_priority(3)
         });
+        let search_menu = self.render_search_menu(c, cx);
         div()
             .id("assistant")
             .flex()
@@ -1752,6 +1862,7 @@ impl Workspace {
                             .items_center()
                             .gap(px(6.))
                             .child(div().flex_1().min_w_0().child(self.assistant.model_picker.clone()))
+                            .child(search_menu)
                             .child(if busy {
                                 button("ai-stop", "Stop", Kind::Normal, true, c).on_click(cx.listener(|this, _, _, cx| this.stop_chat(cx)))
                             } else {
