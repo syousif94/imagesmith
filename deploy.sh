@@ -11,8 +11,6 @@ cd "$ROOT"
 
 REPO_NAME=${REPO_NAME:-$(basename "$ROOT")}
 VISIBILITY=${VISIBILITY:-public}
-VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-TAG=v$VERSION
 TARGET_DIR=${CARGO_TARGET_DIR:-$ROOT/target}
 
 gh auth status >/dev/null 2>&1 || { echo "run 'gh auth login' first" >&2; exit 1; }
@@ -36,6 +34,14 @@ if git remote get-url origin >/dev/null 2>&1; then
 else
     REPO=$(gh api user -q .login)/$REPO_NAME
 fi
+
+OLD_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+IFS=. read -r MAJOR MINOR PATCH <<<"$OLD_VERSION"
+VERSION=$MAJOR.$MINOR.$((PATCH + 1))
+TAG=v$VERSION
+echo "==> version $OLD_VERSION -> $VERSION"
+sed -i '' "s/^version = \"$OLD_VERSION\"/version = \"$VERSION\"/" Cargo.toml
+cargo update --workspace --quiet
 
 echo "==> site"
 [ -f docs/icon.png ] || swift bundle/make-icon.swift docs/icon.png
