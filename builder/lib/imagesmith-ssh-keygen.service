@@ -1,0 +1,12 @@
+[Unit]
+Description=Generate SSH host keys on first boot (ImageSmith)
+Before=ssh.service sshd.service
+ConditionPathExistsGlob=!/etc/ssh/ssh_host_*_key
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ssh-keygen -A
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

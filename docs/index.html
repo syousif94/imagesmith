@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ImageSmith — Linux Image Customizer for macOS</title>
+<meta name="description" content="Customize Linux disk images from a declarative recipe, natively on your Mac.">
+<link rel="icon" href="icon.png">
+<style>
+  :root {
+    --bg: #1e1e20; --surface: #2a2a2e; --border: #3d3d43;
+    --text: #e8e8ea; --muted: #a0a0a8; --accent: #4a8fe7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 72px 24px; }
+  header { text-align: center; }
+  header img { width: 128px; height: 128px; }
+  h1 { font-size: 48px; margin: 16px 0 8px; letter-spacing: -0.02em; }
+  .tagline { color: var(--muted); font-size: 20px; margin: 0 0 32px; }
+  .btn {
+    display: inline-block; background: var(--accent); color: #fff; text-decoration: none;
+    padding: 12px 28px; border-radius: 10px; font-weight: 600; font-size: 17px;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .meta { color: var(--muted); font-size: 14px; margin-top: 12px; }
+  .meta a { color: var(--muted); }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px; margin-top: 64px;
+  }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15px; }
+  section { margin-top: 64px; }
+  h2 { font-size: 24px; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 14px; }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; overflow-x: auto; }
+  footer { margin-top: 64px; text-align: center; color: var(--muted); font-size: 14px; }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body data-repo="syousif94/imagesmith">
+<main>
+  <header>
+    <img src="icon.png" alt="ImageSmith icon">
+    <h1>ImageSmith</h1>
+    <p class="tagline">Customize Linux disk images from a declarative recipe — natively on your Mac.</p>
+    <a class="btn" id="download" href="#">Download for macOS</a>
+    <div class="meta"><span id="version"></span>Requires macOS 26 on Apple silicon · <a id="source" href="#">Source on GitHub</a></div>
+  </header>
+
+  <div class="grid">
+    <div class="card"><h3>Declarative recipes</h3><p>Describe packages, files, users and services once; rebuild the same image every time.</p></div>
+    <div class="card"><h3>Native builds</h3><p>Images are built in a lightweight Linux container — no VM to manage.</p></div>
+    <div class="card"><h3>Built-in assistant</h3><p>Ask the assistant to edit your recipe, explain build output, or fix failures.</p></div>
+    <div class="card"><h3>Files &amp; terminal</h3><p>Browse the image filesystem and open a shell inside it before you ship.</p></div>
+    <div class="card"><h3>Flash to disk</h3><p>Write the finished image straight to an SD card or USB drive.</p></div>
+    <div class="card"><h3>CLI included</h3><p>The <code>imagesmith</code> command line tool ships inside the app for scripting and CI.</p></div>
+  </div>
+
+  <section>
+    <h2>First launch</h2>
+    <p>The app is not notarized yet. If macOS says it can't be opened, right-click ImageSmith in Applications and choose <b>Open</b>, or run:</p>
+    <pre>xattr -dr com.apple.quarantine /Applications/ImageSmith.app</pre>
+  </section>
+
+  <footer>MIT licensed · <a id="releases" href="#">All releases</a></footer>
+</main>
+<script>
+  // deploy.sh fills data-repo; fall back to deriving it from a *.github.io URL.
+  let repo = document.body.dataset.repo;
+  if (!repo && location.hostname.endsWith(".github.io")) {
+    repo = location.hostname.split(".")[0] + "/" + location.pathname.split("/")[1];
+  }
+  if (repo) {
+    const gh = "https://github.com/" + repo;
+    document.getElementById("download").href = gh + "/releases/latest/download/ImageSmith.dmg";
+    document.getElementById("source").href = gh;
+    document.getElementById("releases").href = gh + "/releases";
+    fetch("https://api.github.com/repos/" + repo + "/releases/latest")
+      .then(r => r.ok ? r.json() : null)
+      .then(r => { if (r) document.getElementById("version").textContent = r.tag_name + " · "; })
+      .catch(() => {});
+  }
+</script>
+</body>
+</html>

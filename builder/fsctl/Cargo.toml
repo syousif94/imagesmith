@@ -1,0 +1,11 @@
+[package]
+name = "fsctl"
+version = "0.1.0"
+edition = "2021"
+description = "ImageSmith store helper: Linux-metadata-aware file access inside the store container"
+
+[dependencies]
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+libc = "0.2"

@@ -1,0 +1,22 @@
+# ImageSmith builder image. Built once by the app (imagesmith-builder:<version>)
+# and run as the long-lived imagesmith-store container.
+
+FROM docker.io/library/rust:1-alpine AS fsctl
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY fsctl/Cargo.toml ./
+COPY fsctl/src ./src
+ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_STRIP=true
+RUN cargo build --release
+
+FROM docker.io/library/debian:trixie-slim
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      bash coreutils util-linux fdisk e2fsprogs dpkg jq \
+      xz-utils zstd gzip 7zip bmap-tools libcap2-bin procps ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=fsctl /src/target/release/fsctl /usr/local/bin/fsctl
+COPY build.sh /usr/local/bin/build.sh
+COPY lib/ /usr/local/lib/imagesmith/
+RUN chmod 0755 /usr/local/bin/build.sh /usr/local/lib/imagesmith/*.sh
+LABEL org.opencontainers.image.title="imagesmith-builder"

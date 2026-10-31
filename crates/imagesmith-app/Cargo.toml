@@ -1,0 +1,26 @@
+[package]
+name = "imagesmith-app"
+version.workspace = true
+edition.workspace = true
+description = "ImageSmith macOS app (gpui)"
+
+[[bin]]
+# Not "ImageSmith": on case-insensitive APFS it would collide with the `imagesmith` CLI.
+name = "imagesmith-app"
+path = "src/main.rs"
+
+[dependencies]
+imagesmith-core = { path = "../imagesmith-core" }
+# runtime_shaders: compile Metal shaders at launch so building doesn't need Xcode's Metal toolchain.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+toml_edit = { version = "0.22", features = ["serde"] }
+futures = "0.3"
+unicode-segmentation = "1"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+alacritty_terminal = "0.26"
+
+[dev-dependencies]
+tempfile = "3"
