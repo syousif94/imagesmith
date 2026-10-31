@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use toml_edit::{DocumentMut, Value};
 
-pub const CARDS: [(&str, &str); 9] = [
+pub const CARDS: [(&str, &str); 10] = [
     ("image", "Base Image"),
     ("size", "Disk Size"),
     ("packages", "Software"),
@@ -25,6 +25,7 @@ pub const CARDS: [(&str, &str); 9] = [
     ("files", "Files"),
     ("services", "Services"),
     ("steps", "Custom Steps"),
+    ("host_scripts", "Mac Scripts"),
     ("output", "Export"),
 ];
 
@@ -1460,96 +1461,123 @@ impl Workspace {
         ];
         out.push(self.section("services", "Background services and what runs when the device starts.", vec![group(sv_rows, c).into_any_element()], c));
 
-        // ---------------------------------------------------------- Steps
-        let mut steps_body: Vec<AnyElement> = Vec::new();
-        for (when, heading, detail, empty) in [
-            (StepWhen::First, "Run first", "Before repositories, packages and everything else.", "Nothing runs before the build's own work."),
-            (StepWhen::Last, "Run last", "After packages, users, files and services, just before the image is assembled.", "No custom steps run at the end."),
+        // ---------------------------------------------------------- Steps and Mac scripts
+        for (kind, list, subtitle, groups) in [
+            (
+                "steps",
+                &r.steps,
+                "Your own shell scripts, run inside the image with bash.",
+                [
+                    (StepWhen::First, "Run first", "Before repositories, packages and everything else.", "Nothing runs before the build's own work."),
+                    (StepWhen::Last, "Run last", "After packages, users, files and services, just before the image is assembled.", "No custom steps run at the end."),
+                ],
+            ),
+            (
+                "host_scripts",
+                &r.host_scripts,
+                "Shell scripts run with bash on this Mac in the project folder. You approve each one before it first runs.",
+                [
+                    (StepWhen::First, "Before the build", "For example, compile or download files that Files then copies in.", "Nothing runs on this Mac before the build."),
+                    (StepWhen::Last, "After the build", "$IMAGESMITH_IMAGE is the exported image, $IMAGESMITH_OUTPUT_DIR its folder.", "Nothing runs on this Mac after the build."),
+                ],
+            ),
         ] {
-            let ixs: Vec<usize> = r.steps.iter().enumerate().filter(|(_, s)| s.when == when).map(|(i, _)| i).collect();
-            steps_body.push(
-                div()
-                    .flex()
-                    .items_end()
-                    .gap(px(8.))
-                    .px(px(6.))
-                    .pt(px(4.))
-                    .child(div().text_size(px(12.5)).font_weight(gpui::FontWeight::SEMIBOLD).child(heading))
-                    .child(div().flex_1().text_size(px(11.5)).text_color(c.muted).child(detail))
-                    .into_any_element(),
-            );
-            for (n, &i) in ixs.iter().enumerate() {
-                let s = &r.steps[i];
-                let (prev, next) = (n.checked_sub(1).map(|p| ixs[p]), ixs.get(n + 1).copied());
-                let enabled = s.enabled;
-                let lines: Vec<&str> = s.run.trim_end().lines().collect();
-                const PREVIEW: usize = 6;
-                let more = lines.len().saturating_sub(PREVIEW);
-                let header = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(14.))
-                    .py(px(9.))
-                    .child(switch(("step-en", i), enabled, c).tooltip(tooltip(if enabled { "Runs during the build. Click to skip it." } else { "Skipped. Click to run it again." })).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            this.edit_active(
-                                move |d| {
-                                    if let Some(t) = edits::aot_entry(d, "steps", i) {
-                                        if enabled {
-                                            t.insert("enabled", toml_edit::value(false));
-                                        } else {
-                                            t.remove("enabled");
+            let host = kind == "host_scripts";
+            let ids: [&'static str; 5] =
+                if host { ["host-en", "host-up", "host-down", "host-edit", "host-rm"] } else { ["step-en", "step-up", "step-down", "step-edit", "step-rm"] };
+            let noun = if host { "Script" } else { "Step" };
+            let mut body: Vec<AnyElement> = Vec::new();
+            for (when, heading, detail, empty) in groups {
+                let ixs: Vec<usize> = list.iter().enumerate().filter(|(_, s)| s.when == when).map(|(i, _)| i).collect();
+                body.push(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap(px(8.))
+                        .px(px(6.))
+                        .pt(px(4.))
+                        .child(div().text_size(px(12.5)).font_weight(gpui::FontWeight::SEMIBOLD).child(heading))
+                        .child(div().flex_1().text_size(px(11.5)).text_color(c.muted).child(detail))
+                        .into_any_element(),
+                );
+                for (n, &i) in ixs.iter().enumerate() {
+                    let s = &list[i];
+                    let (prev, next) = (n.checked_sub(1).map(|p| ixs[p]), ixs.get(n + 1).copied());
+                    let enabled = s.enabled;
+                    let lines: Vec<&str> = s.run.trim_end().lines().collect();
+                    const PREVIEW: usize = 6;
+                    let more = lines.len().saturating_sub(PREVIEW);
+                    let header = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .px(px(14.))
+                        .py(px(9.))
+                        .child(switch((ids[0], i), enabled, c).tooltip(tooltip(if enabled { "Runs during the build. Click to skip it." } else { "Skipped. Click to run it again." })).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.edit_active(
+                                    move |d| {
+                                        if let Some(t) = edits::aot_entry(d, kind, i) {
+                                            if enabled {
+                                                t.insert("enabled", toml_edit::value(false));
+                                            } else {
+                                                t.remove("enabled");
+                                            }
                                         }
-                                    }
-                                },
-                                cx,
-                            )
-                        }),
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .child(div().text_size(px(13.5)).font_weight(gpui::FontWeight::SEMIBOLD).child(s.name.clone()))
-                            .child(div().text_size(px(11.5)).text_color(c.muted).child(if enabled { format!("Step {}", n + 1) } else { format!("Step {} · skipped", n + 1) })),
-                    )
-                    .child(button(("step-up", i), "↑", Kind::Ghost, prev.is_some(), c).tooltip(tooltip("Move up")).on_click_if(prev.is_some(), cx.listener(move |this, _, _, cx| {
-                        if let Some(p) = prev {
-                            this.edit_active(move |d| edits::aot_swap(d, "steps", i, p), cx)
-                        }
-                    })))
-                    .child(button(("step-down", i), "↓", Kind::Ghost, next.is_some(), c).tooltip(tooltip("Move down")).on_click_if(next.is_some(), cx.listener(move |this, _, _, cx| {
-                        if let Some(q) = next {
-                            this.edit_active(move |d| edits::aot_swap(d, "steps", i, q), cx)
-                        }
-                    })))
-                    .child(button(("step-edit", i), "Edit…", Kind::Normal, true, c).on_click(cx.listener(move |this, _, w, cx| this.edit_step(Some(i), when, w, cx))))
-                    .child(button(("step-rm", i), "Remove", Kind::Danger, true, c).on_click(cx.listener(move |this, _, _, cx| {
-                        this.edit_active(move |d| edits::aot_remove(d, "steps", i), cx)
-                    })));
-                let code = div()
-                    .px(px(14.))
-                    .py(px(10.))
-                    .bg(c.log_bg)
-                    .font_family(MONO)
-                    .text_size(px(12.))
-                    .line_height(px(17.))
-                    .children(lines.iter().take(PREVIEW).map(|l| div().whitespace_nowrap().overflow_hidden().child(l.to_string())))
-                    .when(more > 0, |d| d.child(div().text_color(c.muted).child(format!("… {more} more line{}", if more == 1 { "" } else { "s" }))));
-                steps_body.push(group([header.into_any_element(), code.into_any_element()], c).when(!enabled, |d| d.opacity(0.65)).into_any_element());
+                                    },
+                                    cx,
+                                )
+                            }),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(div().text_size(px(13.5)).font_weight(gpui::FontWeight::SEMIBOLD).child(s.name.clone()))
+                                .child(div().text_size(px(11.5)).text_color(c.muted).child(if enabled { format!("{noun} {}", n + 1) } else { format!("{noun} {} · skipped", n + 1) })),
+                        )
+                        .child(button((ids[1], i), "↑", Kind::Ghost, prev.is_some(), c).tooltip(tooltip("Move up")).on_click_if(prev.is_some(), cx.listener(move |this, _, _, cx| {
+                            if let Some(p) = prev {
+                                this.edit_active(move |d| edits::aot_swap(d, kind, i, p), cx)
+                            }
+                        })))
+                        .child(button((ids[2], i), "↓", Kind::Ghost, next.is_some(), c).tooltip(tooltip("Move down")).on_click_if(next.is_some(), cx.listener(move |this, _, _, cx| {
+                            if let Some(q) = next {
+                                this.edit_active(move |d| edits::aot_swap(d, kind, i, q), cx)
+                            }
+                        })))
+                        .child(button((ids[3], i), "Edit…", Kind::Normal, true, c).on_click(cx.listener(move |this, _, w, cx| this.edit_step(kind, Some(i), when, w, cx))))
+                        .child(button((ids[4], i), "Remove", Kind::Danger, true, c).on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit_active(move |d| edits::aot_remove(d, kind, i), cx)
+                        })));
+                    let code = div()
+                        .px(px(14.))
+                        .py(px(10.))
+                        .bg(c.log_bg)
+                        .font_family(MONO)
+                        .text_size(px(12.))
+                        .line_height(px(17.))
+                        .children(lines.iter().take(PREVIEW).map(|l| div().whitespace_nowrap().overflow_hidden().child(l.to_string())))
+                        .when(more > 0, |d| d.child(div().text_color(c.muted).child(format!("… {more} more line{}", if more == 1 { "" } else { "s" }))));
+                    body.push(group([header.into_any_element(), code.into_any_element()], c).when(!enabled, |d| d.opacity(0.65)).into_any_element());
+                }
+                if ixs.is_empty() {
+                    body.push(group([div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(c.muted).child(empty).into_any_element()], c).into_any_element());
+                }
+                let id = match (host, when == StepWhen::First) {
+                    (false, true) => "add-step-first",
+                    (false, false) => "add-step-last",
+                    (true, true) => "add-host-first",
+                    (true, false) => "add-host-last",
+                };
+                body.push(
+                    div().flex().px(px(6.)).child(button(id, format!("Add {noun}…"), Kind::Normal, true, c).on_click(cx.listener(move |this, _, w, cx| this.edit_step(kind, None, when, w, cx)))).into_any_element(),
+                );
             }
-            if ixs.is_empty() {
-                steps_body.push(group([div().px(px(14.)).py(px(10.)).text_size(px(12.5)).text_color(c.muted).child(empty).into_any_element()], c).into_any_element());
-            }
-            let id = if when == StepWhen::First { "add-step-first" } else { "add-step-last" };
-            steps_body.push(
-                div().flex().px(px(6.)).child(button(id, "Add Step…", Kind::Normal, true, c).on_click(cx.listener(move |this, _, w, cx| this.edit_step(None, when, w, cx)))).into_any_element(),
-            );
+            out.push(self.section(kind, subtitle, body, c));
         }
-        out.push(self.section("steps", "Your own shell scripts, run inside the image with bash.", steps_body, c));
 
         // ---------------------------------------------------------- Output
         let comp_ix = match r.output.compress {

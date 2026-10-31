@@ -527,6 +527,20 @@ fn cmd_build(project: PathBuf, json: bool, extract_only: bool) -> Result<ExitCod
         passwords.insert(u, a);
     }
 
+    let pending: Vec<_> = if extract_only { vec![] } else { imagesmith_core::host::unapproved(&p, &rf.recipe).into_iter().cloned().collect() };
+    if !pending.is_empty() {
+        eprintln!("This recipe runs scripts on this Mac (outside the container):");
+        for s in &pending {
+            eprintln!("\n── {} ({})\n{}", s.name, if s.when == imagesmith_core::recipe::StepWhen::First { "before the build" } else { "after export" }, s.run.trim_end());
+        }
+        eprintln!();
+        if !std::io::stdin().is_terminal() || !confirm("Run these scripts?") {
+            eprintln!("aborted");
+            return Ok(ExitCode::FAILURE);
+        }
+        imagesmith_core::host::approve(&p, &pending)?;
+    }
+
     let cancel = CancelToken::default();
     let c = cancel.clone();
     let mut hits = 0;

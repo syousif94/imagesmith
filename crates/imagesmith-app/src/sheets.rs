@@ -66,39 +66,82 @@ impl Workspace {
                     .child(div().flex_1().min_h_0().rounded(px(8.)).overflow_hidden().border_1().border_color(c.border).child(term.clone()))
                     .into_any_element()
             }
-            Sheet::Step { index, when, name, area, .. } => div()
+            Sheet::Step { kind, index, when, name, area, .. } => {
+                let host = *kind == "host_scripts";
+                let title = match (host, index.is_some()) {
+                    (true, true) => "Edit Mac Script",
+                    (true, false) => "New Mac Script",
+                    (false, true) => "Edit Step",
+                    (false, false) => "New Step",
+                };
+                let hint = match (host, *when == StepWhen::First) {
+                    (true, true) => "Runs with bash on this Mac in the project folder, before the build.",
+                    (true, false) => "Runs with bash on this Mac in the project folder, after the image is exported.",
+                    (false, true) => "Runs with bash in the chroot before repositories, packages and everything else.",
+                    (false, false) => "Runs with bash in the chroot after packages, users, files and services.",
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+                            .child(div().w(px(320.)).child(name.clone()))
+                            .child(segmented("step-when", if host { &["Before Build", "After Build"] } else { &["Run First", "Run Last"] }, if *when == StepWhen::First { 0 } else { 1 }, c, {
+                                let ws = cx.entity().downgrade();
+                                move |i, _, cx| {
+                                    let _ = ws.update(cx, |this, cx| {
+                                        if let Some(Sheet::Step { when, .. }) = &mut this.sheet {
+                                            *when = if i == 0 { StepWhen::First } else { StepWhen::Last };
+                                        }
+                                        cx.notify();
+                                    });
+                                }
+                            }))
+                            .child(div().flex_1())
+                            .child(div().text_size(px(12.)).text_color(c.muted).child(hint))
+                            .child(button("step-cancel", "Cancel", Kind::Normal, true, c).on_click(cx.listener(|this, _, w, cx| this.close_sheet(w, cx))))
+                            .child(button("step-save", "Save", Kind::Primary, true, c).tooltip(tooltip("Save (⌘S)")).on_click(cx.listener(|this, _, w, cx| this.save_step(w, cx)))),
+                    )
+                    .child(div().flex_1().min_h_0().rounded(px(8.)).overflow_hidden().border_1().border_color(c.border).child(area.clone()))
+                    .into_any_element()
+            }
+            Sheet::HostScripts { scripts, .. } => div()
                 .flex()
                 .flex_col()
-                .size_full()
-                .gap(px(10.))
+                .gap(px(12.))
+                .w(px(640.))
+                .child(div().text_size(px(17.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Run scripts on this Mac?"))
+                .child(div().text_size(px(12.5)).text_color(c.muted).child(
+                    "This recipe runs these scripts with your user account, outside the container. They can read and change anything you can. You are asked again whenever a script changes.",
+                ))
+                .child(
+                    div().id("host-scripts").flex().flex_col().gap(px(10.)).max_h(px(380.)).overflow_y_scroll().children(scripts.iter().map(|s| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(format!(
+                                "{} · {}",
+                                s.name,
+                                if s.when == StepWhen::First { "before the build" } else { "after export" }
+                            )))
+                            .child(div().p(px(8.)).rounded(px(6.)).bg(c.log_bg).font_family(MONO).text_size(px(12.)).children(s.run.trim_end().lines().map(|l| div().child(l.to_string()))))
+                    })),
+                )
                 .child(
                     div()
                         .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .child(div().text_size(px(15.)).font_weight(gpui::FontWeight::SEMIBOLD).child(if index.is_some() { "Edit Step" } else { "New Step" }))
-                        .child(div().w(px(320.)).child(name.clone()))
-                        .child(segmented("step-when", &["Run First", "Run Last"], if *when == StepWhen::First { 0 } else { 1 }, c, {
-                            let ws = cx.entity().downgrade();
-                            move |i, _, cx| {
-                                let _ = ws.update(cx, |this, cx| {
-                                    if let Some(Sheet::Step { when, .. }) = &mut this.sheet {
-                                        *when = if i == 0 { StepWhen::First } else { StepWhen::Last };
-                                    }
-                                    cx.notify();
-                                });
-                            }
-                        }))
-                        .child(div().flex_1())
-                        .child(div().text_size(px(12.)).text_color(c.muted).child(if *when == StepWhen::First {
-                            "Runs with bash in the chroot before repositories, packages and everything else."
-                        } else {
-                            "Runs with bash in the chroot after packages, users, files and services."
-                        }))
-                        .child(button("step-cancel", "Cancel", Kind::Normal, true, c).on_click(cx.listener(|this, _, w, cx| this.close_sheet(w, cx))))
-                        .child(button("step-save", "Save", Kind::Primary, true, c).tooltip(tooltip("Save the step (⌘S)")).on_click(cx.listener(|this, _, w, cx| this.save_step(w, cx)))),
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(button("host-cancel", "Cancel", Kind::Normal, true, c).on_click(cx.listener(|this, _, w, cx| this.close_sheet(w, cx))))
+                        .child(button("host-run", "Run and Build", Kind::Primary, true, c).on_click(cx.listener(|this, _, w, cx| this.approve_host_scripts(w, cx)))),
                 )
-                .child(div().flex_1().min_h_0().rounded(px(8.)).overflow_hidden().border_1().border_color(c.border).child(area.clone()))
                 .into_any_element(),
             Sheet::Repo(s) => div()
                 .flex()

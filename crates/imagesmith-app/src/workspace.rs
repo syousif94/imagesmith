@@ -239,7 +239,8 @@ pub enum Sheet {
     Passwords(PasswordSheet),
     Onboarding { busy: bool, lines: Vec<String>, error: Option<String> },
     Shell { project_id: String, term: Entity<crate::terminal::TerminalView> },
-    Step { index: Option<usize>, when: imagesmith_core::recipe::StepWhen, name: Entity<TextInput>, area: Entity<crate::editor::TextArea>, _sub: Subscription },
+    Step { kind: &'static str, index: Option<usize>, when: imagesmith_core::recipe::StepWhen, name: Entity<TextInput>, area: Entity<crate::editor::TextArea>, _sub: Subscription },
+    HostScripts { project_id: String, scripts: Vec<imagesmith_core::recipe::Step> },
     Repo(RepoSheet),
     Flash(FlashSheet),
 }
@@ -737,6 +738,15 @@ impl Workspace {
             return;
         }
         let id = p.id().to_string();
+        let pending: Vec<_> = match &p.recipe {
+            Some(r) if !extract_only => imagesmith_core::host::unapproved(&p.project, &r.recipe).into_iter().cloned().collect(),
+            _ => vec![],
+        };
+        if !pending.is_empty() {
+            self.sheet = Some(Sheet::HostScripts { project_id: id, scripts: pending });
+            cx.notify();
+            return;
+        }
         let users = p.recipe.as_ref().map(|r| build::prompt_users(&r.recipe)).unwrap_or_default();
         if !users.is_empty() && !extract_only {
             let fields = users
@@ -755,6 +765,20 @@ impl Workspace {
             return;
         }
         self.enqueue(id, Options { extract_only, ..Default::default() }, cx);
+    }
+
+    pub fn approve_host_scripts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Sheet::HostScripts { project_id, scripts }) = self.sheet.take() else { return };
+        window.focus(&self.focus);
+        let Some(p) = self.projects.iter().find(|p| p.id() == project_id) else { return };
+        if let Err(e) = imagesmith_core::host::approve(&p.project, &scripts) {
+            self.alert("Could not save the approval", &e.to_string(), window, cx);
+            return;
+        }
+        if self.active().is_some_and(|p| p.id() == project_id) {
+            self.request_build(false, window, cx);
+        }
+        cx.notify();
     }
 
     pub fn submit_passwords(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2248,9 +2272,12 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Opens the step editor for step `index`, or a new step that runs `when`.
-    pub fn edit_step(&mut self, index: Option<usize>, when: imagesmith_core::recipe::StepWhen, window: &mut Window, cx: &mut Context<Self>) {
-        let step = index.and_then(|i| self.active()?.recipe.as_ref()?.recipe.steps.get(i).cloned());
+    /// Opens the editor for entry `index` of `kind` ("steps" or "host_scripts"), or a new one that runs `when`.
+    pub fn edit_step(&mut self, kind: &'static str, index: Option<usize>, when: imagesmith_core::recipe::StepWhen, window: &mut Window, cx: &mut Context<Self>) {
+        let step = index.and_then(|i| {
+            let r = &self.active()?.recipe.as_ref()?.recipe;
+            if kind == "host_scripts" { &r.host_scripts } else { &r.steps }.get(i).cloned()
+        });
         let when = step.as_ref().map(|s| s.when).unwrap_or(when);
         let (n, r) = step.map(|s| (s.name, s.run)).unwrap_or_default();
         let name = cx.new(|cx| {
@@ -2265,13 +2292,13 @@ impl Workspace {
             }
         });
         window.focus(&area.focus_handle(cx));
-        self.sheet = Some(Sheet::Step { index, when, name, area, _sub: sub });
+        self.sheet = Some(Sheet::Step { kind, index, when, name, area, _sub: sub });
         cx.notify();
     }
 
     pub fn save_step(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Sheet::Step { index, when, name, area, .. }) = &self.sheet else { return };
-        let (index, first) = (*index, *when == imagesmith_core::recipe::StepWhen::First);
+        let Some(Sheet::Step { kind, index, when, name, area, .. }) = &self.sheet else { return };
+        let (kind, index, first) = (*kind, *index, *when == imagesmith_core::recipe::StepWhen::First);
         let name = name.read(cx).text().trim().to_string();
         let mut run = area.read(cx).text().trim_end().to_string();
         if run.trim().is_empty() {
@@ -2283,7 +2310,7 @@ impl Workspace {
         self.edit_active(
             move |d| {
                 let run_v = crate::edits::multiline(&run);
-                match index.and_then(|i| crate::edits::aot_entry(d, "steps", i)) {
+                match index.and_then(|i| crate::edits::aot_entry(d, kind, i)) {
                     Some(t) => {
                         t.insert("name", toml_edit::value(name.as_str()));
                         t.insert("run", toml_edit::Item::Value(run_v));
@@ -2298,7 +2325,7 @@ impl Workspace {
                         if first {
                             pairs.push(("when", "first".into()));
                         }
-                        crate::edits::aot_push(d, "steps", crate::edits::table_from(&pairs))
+                        crate::edits::aot_push(d, kind, crate::edits::table_from(&pairs))
                     }
                 }
             },

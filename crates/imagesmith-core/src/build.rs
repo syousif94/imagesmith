@@ -5,7 +5,7 @@ use crate::events::{parse_line, Event, Line};
 use crate::hashing::sha256_cached;
 use crate::probe::Probe;
 use crate::project::{new_build_id, BuildRecord, Project, ProjectIndex};
-use crate::recipe::{PasswordMode, Recipe};
+use crate::recipe::{PasswordMode, Recipe, StepWhen};
 use crate::resolve::{self, Lock};
 use crate::runner::Runtime;
 use crate::size::human;
@@ -112,6 +112,36 @@ pub fn run(rt: &Runtime, project: &Project, opts: &Options, cancel: &CancelToken
         on(Update::Diagnostics(&pre));
         return Err(Error::Invalid(pre.iter().filter(|d| d.severity == Severity::Error).count()));
     }
+    let run_host = !opts.extract_only;
+    if run_host {
+        let pending = crate::host::unapproved(project, &recipe);
+        if !pending.is_empty() {
+            let names: Vec<&str> = pending.iter().map(|s| s.name.as_str()).collect();
+            return Err(Error::Other(format!("Mac scripts not approved: {}", names.join(", "))));
+        }
+    }
+    let build_id = new_build_id();
+    let host_env = |extra: Vec<(&'static str, String)>| {
+        let mut v = vec![
+            ("IMAGESMITH_PROJECT_DIR", project.path.display().to_string()),
+            ("IMAGESMITH_BUILD_ID", build_id.clone()),
+            ("IMAGESMITH_IMAGE_NAME", recipe.image.name.clone()),
+            ("IMAGESMITH_ARCH", recipe.image.arch.as_str().to_string()),
+        ];
+        v.extend(extra);
+        v
+    };
+    let mut tracker = Tracker::new(Some(&recipe));
+    let mut host_log: Vec<String> = Vec::new();
+    let first = crate::host::enabled(&recipe, StepWhen::First);
+    if run_host && !first.is_empty() {
+        crate::host::run(project, &first, &host_env(vec![]), cancel, &mut |text| {
+            let line = Line::Log(text.clone());
+            tracker.apply(&line, 0);
+            on(Update::Line(&line, &tracker));
+            host_log.push(text);
+        })?;
+    }
     let (sha, probe) = prepare_base(rt, &base, on)?;
     let diags = validate::validate(
         &project.path,
@@ -132,7 +162,6 @@ pub fn run(rt: &Runtime, project: &Project, opts: &Options, cancel: &CancelToken
         passwords.insert(u, pw.clone());
     }
 
-    let build_id = new_build_id();
     let resolved = resolve::resolve(&project.path, &project.id, &build_id, &recipe, &sha, &probe)?;
 
     // Space: 3× the uncompressed base in the store, the output on the host.
@@ -165,6 +194,10 @@ pub fn run(rt: &Runtime, project: &Project, opts: &Options, cancel: &CancelToken
     let tar_len = std::fs::metadata(&tar_path)?.len();
     let mut log = std::io::BufWriter::new(std::fs::File::create(staging.join("build.log"))?);
     let mut events = std::io::BufWriter::new(std::fs::File::create(staging.join("events.jsonl"))?);
+    for text in host_log {
+        writeln!(log, "{text}")?;
+        writeln!(events, "{}", serde_json::json!({ "t": 0, "log": text }))?;
+    }
 
     let mut args = vec!["build.sh", "--project-id", project.id.as_str(), "--build-id", build_id.as_str()];
     if opts.extract_only {
@@ -207,7 +240,6 @@ pub fn run(rt: &Runtime, project: &Project, opts: &Options, cancel: &CancelToken
     }
     drop(tx);
 
-    let mut tracker = Tracker::new(Some(&recipe));
     tracker.state = BuildState::Running;
     on(Update::State(BuildState::Running));
     let start = Instant::now();
@@ -272,8 +304,6 @@ pub fn run(rt: &Runtime, project: &Project, opts: &Options, cancel: &CancelToken
     }
     log.flush()?;
     events.flush()?;
-    drop(log);
-    drop(events);
 
     if opts.extract_only {
         on(Update::State(tracker.state));
@@ -299,6 +329,39 @@ pub fn run(rt: &Runtime, project: &Project, opts: &Options, cancel: &CancelToken
     if !export_failed {
         let _ = crate::store::evict(rt, "tmp", &build_id);
     }
+    let last = crate::host::enabled(&recipe, StepWhen::Last);
+    if run_host && tracker.state == BuildState::Succeeded && !last.is_empty() {
+        let image = tracker.artifacts.iter().find(|a| a.kind == "image").map(|a| dir.join(&a.path).display().to_string());
+        let mut extra = vec![("IMAGESMITH_OUTPUT_DIR", dir.display().to_string())];
+        extra.extend(image.map(|i| ("IMAGESMITH_IMAGE", i)));
+        let t = start.elapsed().as_millis() as u64;
+        let mut io_err = None;
+        let r = crate::host::run(project, &last, &host_env(extra), cancel, &mut |text| {
+            if let Err(e) = writeln!(log, "{text}").and_then(|_| writeln!(events, "{}", serde_json::json!({ "t": t, "log": text }))) {
+                io_err.get_or_insert(e);
+            }
+            let line = Line::Log(text);
+            tracker.apply(&line, t);
+            on(Update::Line(&line, &tracker));
+        });
+        if let Some(e) = io_err {
+            return Err(e.into());
+        }
+        if let Err(e) = r {
+            if !matches!(e, Error::Cancelled) {
+                let stage = tracker.current_stage().map(|s| s.id.clone()).unwrap_or_else(|| "package".into());
+                let ev = Event::Error { stage, message: e.to_string(), hint: Some("The image was exported; fix the Mac script and build again".into()) };
+                writeln!(events, "{}", serde_json::json!({ "t": t, "event": ev }))?;
+                tracker.apply_event(&ev, t);
+            }
+            tracker.state = if matches!(e, Error::Cancelled) { BuildState::Cancelled } else { BuildState::Failed };
+            error = Some(e.to_string());
+        }
+    }
+    log.flush()?;
+    events.flush()?;
+    drop(log);
+    drop(events);
     for f in ["build.log", "events.jsonl"] {
         move_file(&staging.join(f), &dir.join(f))?;
     }

@@ -32,7 +32,9 @@ const ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_ROUNDS: usize = 16;
 const SECTIONS: [&str; 6] = ["image", "size", "system", "packages", "services", "output"];
 const LISTS: [&str; 4] = ["packages.install", "packages.remove", "services.enable", "services.disable"];
-const KINDS: [&str; 4] = ["users", "repos", "files", "steps"];
+const KINDS: [&str; 5] = ["users", "repos", "files", "steps", "host_scripts"];
+const MAX_LIST: usize = 500;
+const MAX_READ: usize = 64 * 1024;
 
 #[derive(Serialize, Deserialize)]
 pub struct ToolRecord {
@@ -293,6 +295,18 @@ fn base_tools() -> Value {
     json!([
         tool("get_recipe", "Return the current recipe.toml and its validation problems.", json!({}), &[]),
         tool(
+            "list_files",
+            "List files in the project folder on the Mac (recursively, with sizes), to find files to reference from [[files]] src, ssh_keys or repo keys. Paths are relative to the project folder. Hidden entries and builds/ are skipped.",
+            json!({ "path": { "type": "string", "description": "Project-relative folder (default \".\")" } }),
+            &[],
+        ),
+        tool(
+            "read_file",
+            "Read a text file in the project folder (project-relative path, first 64 KB).",
+            json!({ "path": { "type": "string" } }),
+            &["path"],
+        ),
+        tool(
             "identify_image",
             "Inspect the configured base image and report its path, SHA-256, partition layout, architecture, Linux distribution, and root filesystem details. Do not infer an image identity when probe data is unavailable.",
             json!({}),
@@ -322,7 +336,7 @@ fn base_tools() -> Value {
         ),
         tool(
             "add_entry",
-            "Append a [[users]], [[repos]], [[files]] or [[steps]] entry.",
+            "Append a [[users]], [[repos]], [[files]], [[steps]] or [[host_scripts]] entry.",
             json!({ "kind": kind, "fields": fields }),
             &["kind", "fields"],
         ),
@@ -399,6 +413,7 @@ fn entry_count(p: &ProjectState, kind: &str) -> usize {
         "users" => r.users.len(),
         "repos" => r.repos.len(),
         "files" => r.files.len(),
+        "host_scripts" => r.host_scripts.len(),
         _ => r.steps.len(),
     }
 }
@@ -409,6 +424,7 @@ fn entry_label(p: &ProjectState, kind: &str, i: usize) -> Option<String> {
         "users" => r.users.get(i).map(|x| x.name.clone()),
         "repos" => r.repos.get(i).map(|x| x.name.clone()),
         "files" => r.files.get(i).map(|x| x.dst.clone()),
+        "host_scripts" => r.host_scripts.get(i).map(|x| x.name.clone()),
         _ => r.steps.get(i).map(|x| x.name.clone()),
     }
 }
@@ -418,8 +434,75 @@ fn singular(kind: &str) -> &str {
         "users" => "user",
         "repos" => "repository",
         "files" => "file",
+        "host_scripts" => "Mac script",
         _ => "step",
     }
+}
+
+/// Resolves a project-relative path, refusing anything outside the project folder (also via symlinks).
+fn project_path(p: &ProjectState, rel: &str) -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+    if std::path::Path::new(rel).is_absolute() {
+        return Err("use a path relative to the project folder".into());
+    }
+    let root = p.project.path.canonicalize().map_err(|e| e.to_string())?;
+    let path = root.join(rel).canonicalize().map_err(|_| format!("{rel} does not exist in the project folder"))?;
+    if !path.starts_with(&root) {
+        return Err(format!("{rel} is outside the project folder"));
+    }
+    Ok((root, path))
+}
+
+fn list_files(p: &ProjectState, rel: &str) -> Result<String, String> {
+    let (root, dir) = project_path(p, rel)?;
+    if !dir.is_dir() {
+        return Err(format!("{rel} is not a folder"));
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![dir];
+    let mut capped = false;
+    'walk: while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).map_err(|e| e.to_string())?.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            let shown = path.strip_prefix(&root).unwrap_or(&path).display().to_string();
+            if name.starts_with('.') || shown == "builds" {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if meta.is_dir() {
+                out.push(format!("{shown}/"));
+                stack.push(path);
+            } else {
+                out.push(format!("{shown}\t{}", imagesmith_core::size::human(meta.len())));
+            }
+            if out.len() >= MAX_LIST {
+                capped = true;
+                break 'walk;
+            }
+        }
+    }
+    out.sort();
+    if capped {
+        out.push(format!("… stopped after {MAX_LIST} entries; list a subfolder"));
+    }
+    Ok(if out.is_empty() { "(empty)".into() } else { out.join("\n") })
+}
+
+fn read_project_file(p: &ProjectState, rel: &str) -> Result<String, String> {
+    let (_, path) = project_path(p, rel)?;
+    let mut bytes = Vec::new();
+    let f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+    let len = f.metadata().map_err(|e| e.to_string())?.len();
+    f.take(MAX_READ as u64).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.contains(&0) {
+        return Ok(format!("{rel} is a binary file ({}).", imagesmith_core::size::human(len)));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    if text.contains("PRIVATE KEY") {
+        return Err(format!("{rel} looks like a private key; it was not read"));
+    }
+    let more = if len as usize > MAX_READ { format!("\n… truncated; the file is {}", imagesmith_core::size::human(len)) } else { String::new() };
+    Ok(format!("{text}{more}"))
 }
 
 fn fields_arg(a: &Value) -> Result<Vec<(String, Option<toml_edit::Value>)>, String> {
@@ -505,6 +588,8 @@ fn problems(p: &ProjectState) -> String {
 fn run_tool(p: &mut ProjectState, name: &str, a: &Value) -> (String, Result<String, String>) {
     let summary = match name {
         "get_recipe" => "Read the recipe".to_string(),
+        "list_files" => format!("Listed {}", a.get("path").and_then(Value::as_str).unwrap_or("the project folder")),
+        "read_file" => format!("Read {}", short_str(a, "path")),
         "identify_image" => "Identified the base image".to_string(),
         "set_field" => match a.get("value") {
             Some(Value::Null) | None => format!("Cleared {}.{}", short_str(a, "section"), short_str(a, "key")),
@@ -536,6 +621,8 @@ fn short_str(a: &Value, k: &str) -> String {
 fn execute(p: &mut ProjectState, name: &str, a: &Value) -> Result<String, String> {
     match name {
         "get_recipe" => return Ok(recipe_report(p)),
+        "list_files" => return list_files(p, a.get("path").and_then(Value::as_str).unwrap_or(".")),
+        "read_file" => return read_project_file(p, str_arg(a, "path")?),
         "identify_image" => return image_report(p),
         "set_field" => {
             let section = str_arg(a, "section")?;
@@ -826,9 +913,10 @@ Recipe schema:
 [services] enable, disable (systemd units)
 [[files]] src (project-relative file), dst (absolute path in image), mode ("0644"), owner ("root:root")
 [[steps]] name, run (bash script run in a chroot), enabled (bool), when ("first" runs right after the base is unpacked, before repos and packages; "last", the default, runs after packages, users, files and services)
+[[host_scripts]] name, run (bash script run on the user's Mac with cwd = project folder), enabled (bool), when ("first", runs before the build, e.g. to compile or download a file that [[files]] then copies; "last", the default, runs after export with $IMAGESMITH_IMAGE and $IMAGESMITH_OUTPUT_DIR set). Also set: $IMAGESMITH_PROJECT_DIR, $IMAGESMITH_BUILD_ID, $IMAGESMITH_IMAGE_NAME, $IMAGESMITH_ARCH. The user approves each script before it runs. Use them only for work that must happen on the Mac; anything that changes the image belongs in [[steps]].
 [output] compress ("none"|"zstd"|"xz"), level, bmap (bool), checksum ("sha256"|"none")
 
-Build order: first steps, packages (repos are added first), users and system settings, files, services, last steps, then shrink and export. To put a file with given contents in the image, add a step that writes it (e.g. with a heredoc). {research} The project folder is {path}.
+Build order: Mac scripts "first", first steps, packages (repos are added first), users and system settings, files, services, last steps, shrink and export, then Mac scripts "last". To copy a file from the project folder, find it with list_files and add a [[files]] entry with its project-relative src; to put a file with given contents in the image, add a step that writes it (e.g. with a heredoc). {research} The project folder is {path}.
 
 run_command runs a script inside the project's stage after the user approves it. {stage} Use it to check facts about the image instead of guessing, or to test commands before putting them in a step. Changes it makes are lost on the next build unless they are recorded in the recipe: either add them to the recipe yourself, or tell the user they can press "Keep Changes…" on the command to record them. Explain briefly why you want to run a command; never run destructive commands the user did not ask for.
 
@@ -1962,5 +2050,28 @@ mod tests {
         assert!(r.is_err());
         let (_, r) = run_tool(&mut p, "get_recipe", &json!({}));
         assert!(r.unwrap().contains("[[repos]]"));
+    }
+
+    #[test]
+    fn project_files_stay_inside_project() {
+        let (d, mut p) = project();
+        std::fs::create_dir_all(d.path().join("files/etc")).unwrap();
+        std::fs::write(d.path().join("files/etc/motd"), "hello\n").unwrap();
+        std::fs::write(d.path().join("files/id"), "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+        let (_, r) = run_tool(&mut p, "list_files", &json!({}));
+        assert!(r.unwrap().contains("files/etc/motd\t"));
+        let (s, r) = run_tool(&mut p, "read_file", &json!({ "path": "files/etc/motd" }));
+        assert_eq!((s.as_str(), r.unwrap().as_str()), ("Read files/etc/motd", "hello\n"));
+        assert!(run_tool(&mut p, "read_file", &json!({ "path": "files/id" })).1.is_err());
+        assert!(run_tool(&mut p, "read_file", &json!({ "path": "../../etc/hosts" })).1.is_err());
+        assert!(run_tool(&mut p, "read_file", &json!({ "path": "/etc/hosts" })).1.is_err());
+        std::os::unix::fs::symlink("/etc", d.path().join("files/out")).unwrap();
+        assert!(run_tool(&mut p, "read_file", &json!({ "path": "files/out/hosts" })).1.unwrap_err().contains("outside"));
+
+        let script = json!({ "kind": "host_scripts", "fields": { "name": "gen", "run": "echo hi > files/gen.txt\n", "when": "first" } });
+        let (s, r) = run_tool(&mut p, "add_entry", &script);
+        assert_eq!(s, "Added Mac script gen");
+        assert!(r.is_ok());
+        assert_eq!(p.recipe.as_ref().unwrap().recipe.host_scripts[0].when, imagesmith_core::recipe::StepWhen::First);
     }
 }

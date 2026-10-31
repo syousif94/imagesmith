@@ -24,6 +24,9 @@ pub struct Recipe {
     pub files: Vec<FileEntry>,
     #[serde(default)]
     pub steps: Vec<Step>,
+    /// Scripts run on the Mac in the project folder: `first` before the build, `last` after export.
+    #[serde(default)]
+    pub host_scripts: Vec<Step>,
     #[serde(default)]
     pub output: Output,
 }

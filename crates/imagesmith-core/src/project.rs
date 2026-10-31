@@ -8,6 +8,89 @@ use std::path::{Path, PathBuf};
 
 pub const RECIPE: &str = "recipe.toml";
 pub const GITIGNORE: &str = "bases/\nbuilds/\n";
+pub const AGENTS_MD: &str = r#"# ImageSmith project
+
+This folder is an ImageSmith project: `recipe.toml` customizes a Linux disk image
+(Debian-family rootfs) and ImageSmith builds it on a Mac. Read `recipe.toml` first;
+`[image].arch` (`arm64` | `amd64`) is the CPU every binary you add must target.
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `recipe.toml` | The recipe. Edit it to add files, packages, services, steps. |
+| `overlay/` | Mirror of the image's `/`. Everything here is copied into the rootfs. |
+| `files/` | Single files placed via `[[files]]` entries with explicit dst/mode/owner. |
+| `bases/` | Base images (git-ignored). Do not modify. |
+| `builds/` | Build outputs (git-ignored). Do not write here. |
+
+## Getting things into the image
+
+**overlay/** (preferred for trees of files): `overlay/usr/local/bin/foo` lands at
+`/usr/local/bin/foo`. Ownership becomes `root:root`; file modes are kept, so
+`chmod 0755` executables and `chmod 0600` secrets before building. Symlinks are
+copied as symlinks and resolve against the image.
+
+**files/** + `[[files]]` (when you need a specific owner or mode):
+
+```toml
+[[files]]
+src = "files/myapp"
+dst = "/opt/myapp/bin/myapp"
+mode = "0755"           # default 0644
+owner = "myuser:myuser"  # default root:root; user must exist in the image
+```
+
+Order during a build: `when = "first"` steps -> packages -> `[[files]]` ->
+`overlay/` -> `[services]` -> `[[steps]]`. So default steps can use the files,
+and services can reference units you added.
+
+## Binaries
+
+- Must be Linux ELF for the recipe arch, never macOS Mach-O. Check with `file`.
+- Prefer fully static builds so they don't depend on the image's libc:
+  - Rust: `cargo zigbuild --release --target aarch64-unknown-linux-musl`
+    (or `x86_64-unknown-linux-musl` for amd64).
+  - Go: `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build`.
+  - C: `zig cc -target aarch64-linux-musl -static`.
+- If a binary must link dynamically, install its runtime libs via
+  `[packages].install` and build against the same distro release.
+- If it's packaged for the distro, `[packages].install` beats shipping a binary.
+
+## Scripts
+
+- Start with a shebang (`#!/bin/sh` or `#!/bin/bash`), use LF line endings,
+  and make them executable (`chmod 0755` in overlay/, or `mode = "0755"`).
+- Only use interpreters present in the image (add them to `[packages].install`).
+- systemd units go in `overlay/etc/systemd/system/<name>.service`; add
+  `<name>` to `[services].enable`.
+
+## Running commands
+
+- `[[steps]]` run as root inside the image (chroot, emulated if needed) during
+  the build. Use them for configuration that must happen in the target, not
+  for cross-compiling:
+
+  ```toml
+  [[steps]]
+  name = "Enable foo"
+  run = "/usr/local/bin/foo --init"
+  when = "last"  # or "first"; default last
+  ```
+
+- `[[host_scripts]]` run bash on the Mac in this folder (same fields as steps).
+  `when = "first"` runs before the image is touched: use it to build binaries
+  into `overlay/` or `files/`. `when = "last"` runs after export with
+  `$IMAGESMITH_IMAGE` and `$IMAGESMITH_OUTPUT_DIR`. Also available:
+  `$IMAGESMITH_PROJECT_DIR`, `$IMAGESMITH_BUILD_ID`, `$IMAGESMITH_IMAGE_NAME`,
+  `$IMAGESMITH_ARCH`. The user must approve each host script before it runs.
+
+## Don'ts
+
+- No private keys, tokens or passwords in this folder unless the user asks; it
+  is usually committed to git.
+- Don't write outside this folder or into `bases/` or `builds/`.
+"#;
 
 pub struct Project {
     pub path: PathBuf,
@@ -20,6 +103,11 @@ impl Project {
         let path = path.canonicalize()?;
         if !path.join(RECIPE).is_file() {
             return Err(Error::Other(format!("{} has no {RECIPE}", path.display())));
+        }
+        let agents = path.join("AGENTS.md");
+        if !agents.exists() {
+            // Best effort: the folder may be read-only.
+            let _ = std::fs::write(&agents, AGENTS_MD);
         }
         let id = ProjectIndex::load().id_for(&path)?;
         Ok(Project { path, id })

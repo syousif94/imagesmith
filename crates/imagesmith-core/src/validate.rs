@@ -2,7 +2,7 @@
 
 use crate::app_dirs::expand_tilde;
 use crate::probe::Probe;
-use crate::recipe::{Arch, Compress, PasswordMode, Recipe, SizeMode};
+use crate::recipe::{Arch, Compress, PasswordMode, Recipe, SizeMode, StepWhen};
 use crate::size::{human, parse_percent, parse_size};
 use regex::Regex;
 use serde::Serialize;
@@ -272,9 +272,12 @@ pub fn validate(project: &Path, r: &Recipe, ctx: &Context) -> Vec<Diagnostic> {
     }
 
     // [[files]]
+    let host_first = r.host_scripts.iter().any(|s| s.enabled && s.when == StepWhen::First);
     for (i, f) in r.files.iter().enumerate() {
         let src = resolve_project_path(project, &f.src);
-        if !src.is_file() {
+        if !src.is_file() && host_first {
+            o.warn(format!("files[{i}].src"), format!("source not found yet: {}", src.display()), Some("A Mac script that runs first must create it".into()));
+        } else if !src.is_file() {
             o.error(format!("files[{i}].src"), format!("source not found: {}", src.display()));
         }
         if !f.dst.starts_with('/') {
@@ -297,6 +300,14 @@ pub fn validate(project: &Path, r: &Recipe, ctx: &Context) -> Vec<Diagnostic> {
         }
         if s.run.trim().is_empty() {
             o.error(format!("steps[{i}].run"), "step has nothing to run");
+        }
+    }
+    for (i, s) in r.host_scripts.iter().enumerate() {
+        if s.name.trim().is_empty() {
+            o.error(format!("host_scripts[{i}].name"), "script needs a name");
+        }
+        if s.run.trim().is_empty() {
+            o.error(format!("host_scripts[{i}].run"), "script has nothing to run");
         }
     }
 

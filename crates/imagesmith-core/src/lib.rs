@@ -6,6 +6,7 @@ pub mod build;
 pub mod events;
 pub mod flash;
 pub mod hashing;
+pub mod host;
 pub mod probe;
 pub mod project;
 pub mod recipe;
