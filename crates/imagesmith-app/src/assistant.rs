@@ -183,7 +183,7 @@ impl ProjectChats {
     }
 }
 
-fn chats_file(pid: &str) -> std::path::PathBuf {
+pub fn chats_file(pid: &str) -> std::path::PathBuf {
     let safe: String = pid.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
     imagesmith_core::app_dirs::chats_dir().join(format!("{safe}.json"))
 }

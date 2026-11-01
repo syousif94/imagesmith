@@ -149,7 +149,36 @@ pub struct FilesView {
     capture: Option<Vec<(String, String, bool)>>,
     editor: Option<(Entry, Entity<TextArea>, Subscription)>,
     pending_capture: bool,
+    list_width: f32,
     _subs: Vec<Subscription>,
+}
+
+/// Which optional columns fit in the file list.
+#[derive(Clone, Copy)]
+struct Cols {
+    mode: bool,
+    owner: bool,
+    size: bool,
+    mtime: bool,
+}
+
+impl Cols {
+    fn fit(width: f32) -> Cols {
+        // padding + icon + change badge + minimum name width, each column adds a 10px gap.
+        let mut used = 20. + 22. + 86. + 200.;
+        let mut take = |w: f32| {
+            let ok = width <= 0. || used + w + 10. <= width;
+            if ok {
+                used += w + 10.;
+            }
+            ok
+        };
+        let size = take(70.);
+        let mode = take(90.);
+        let mtime = take(120.);
+        let owner = take(110.);
+        Cols { mode, owner, size, mtime }
+    }
 }
 
 fn parent_of(p: &str) -> String {
@@ -212,6 +241,7 @@ impl FilesView {
             capture: None,
             editor: None,
             pending_capture: false,
+            list_width: 0.,
             _subs: vec![s1, s2],
         };
         v.refresh(cx);
@@ -784,7 +814,7 @@ impl FilesView {
         }
     }
 
-    fn row(&self, ix: usize, e: &Entry, removed: bool, c: &Colors, cx: &mut Context<Self>) -> AnyElement {
+    fn row(&self, ix: usize, e: &Entry, removed: bool, cols: Cols, c: &Colors, cx: &mut Context<Self>) -> AnyElement {
         let sel = self.selected.as_deref() == Some(e.path.as_str());
         let e2 = e.clone();
         let hover = c.hover;
@@ -806,12 +836,12 @@ impl FilesView {
             .when(!sel, move |d| d.hover(move |s| s.bg(hover)))
             .when(removed, |d| d.text_color(c.faint).line_through())
             .child(div().w(px(12.)).text_color(c.muted).child(icon))
-            .child(div().flex_1().overflow_hidden().whitespace_nowrap().text_ellipsis().when(e.is_dir(), |d| d.font_weight(gpui::FontWeight::MEDIUM)).child(e.name.clone()))
-            .child(div().w(px(90.)).font_family(MONO).text_size(px(11.5)).child(e.mode_str.clone()))
-            .child(div().w(px(110.)).overflow_hidden().whitespace_nowrap().child(e.owner.clone()))
-            .child(div().w(px(70.)).text_color(c.muted).child(if e.is_dir() { String::new() } else { human(e.size) }))
-            .child(div().w(px(120.)).text_color(c.muted).child(fmt_mtime(e.mtime)))
-            .child(div().w(px(76.)).children(self.badge(&e.path, c)))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().when(e.is_dir(), |d| d.font_weight(gpui::FontWeight::MEDIUM)).child(e.name.clone()))
+            .when(cols.mode, |d| d.child(div().w(px(90.)).flex_none().font_family(MONO).text_size(px(11.5)).child(e.mode_str.clone())))
+            .when(cols.owner, |d| d.child(div().w(px(110.)).flex_none().overflow_hidden().whitespace_nowrap().child(e.owner.clone())))
+            .when(cols.size, |d| d.child(div().w(px(70.)).flex_none().text_color(c.muted).child(if e.is_dir() { String::new() } else { human(e.size) })))
+            .when(cols.mtime, |d| d.child(div().w(px(120.)).flex_none().text_color(c.muted).child(fmt_mtime(e.mtime))))
+            .child(div().w(px(76.)).flex_none().children(self.badge(&e.path, c)))
             .when(!removed, |d| {
                 d.on_click(cx.listener(move |this, ev: &ClickEvent, w, cx| {
                     if ev.click_count() >= 2 {
@@ -1067,6 +1097,7 @@ impl Render for FilesView {
         self.render_tree("/", 1, &c, &mut tree, cx);
 
         // File list for the current directory (or search results).
+        let cols = Cols::fit(self.list_width);
         let mut rows = Vec::new();
         let listing: Vec<Entry> = match &self.results {
             Some(r) => r.clone(),
@@ -1080,7 +1111,7 @@ impl Render for FilesView {
             if self.results.is_some() {
                 e.name = e.path.clone();
             }
-            rows.push(self.row(i, &e, false, &c, cx));
+            rows.push(self.row(i, &e, false, cols, &c, cx));
         }
         if self.results.is_none() {
             let prefix = if self.cwd == "/" { "/".to_string() } else { format!("{}/", self.cwd) };
@@ -1103,7 +1134,7 @@ impl Render for FilesView {
                     mtime: 0,
                     target: None,
                 };
-                rows.push(self.row(100_000 + j, &e, true, &c, cx));
+                rows.push(self.row(100_000 + j, &e, true, cols, &c, cx));
             }
         }
         let header = div()
@@ -1116,13 +1147,13 @@ impl Render for FilesView {
             .border_color(c.border)
             .text_size(px(11.))
             .text_color(c.muted)
-            .child(div().w(px(12.)))
-            .child(div().flex_1().child("NAME"))
-            .child(div().w(px(90.)).child("MODE"))
-            .child(div().w(px(110.)).child("OWNER"))
-            .child(div().w(px(70.)).child("SIZE"))
-            .child(div().w(px(120.)).child("MODIFIED"))
-            .child(div().w(px(76.)).child("CHANGE"));
+            .child(div().w(px(12.)).flex_none())
+            .child(div().flex_1().min_w_0().child("NAME"))
+            .when(cols.mode, |d| d.child(div().w(px(90.)).flex_none().child("MODE")))
+            .when(cols.owner, |d| d.child(div().w(px(110.)).flex_none().child("OWNER")))
+            .when(cols.size, |d| d.child(div().w(px(70.)).flex_none().child("SIZE")))
+            .when(cols.mtime, |d| d.child(div().w(px(120.)).flex_none().child("MODIFIED")))
+            .child(div().w(px(76.)).flex_none().child("CHANGE"));
 
         let capture = self.capture.clone().map(|list| {
             let mut col = div().flex().flex_col().gap(px(2.)).max_h(px(220.));
@@ -1244,6 +1275,24 @@ impl Render for FilesView {
                             .flex_col()
                             .flex_1()
                             .min_w_0()
+                            .relative()
+                            .child({
+                                let view = cx.entity();
+                                gpui::canvas(
+                                    move |bounds, _, cx| {
+                                        let w = f32::from(bounds.size.width);
+                                        view.update(cx, |v, cx| {
+                                            if (v.list_width - w).abs() > 0.5 {
+                                                v.list_width = w;
+                                                cx.notify();
+                                            }
+                                        });
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full()
+                            })
                             .child(header)
                             .child(div().id("file-list").flex_1().min_h_0().overflow_y_scroll().children(rows))
                             .child(div().h(px(240.)).flex_none().border_t_1().border_color(c.border).child(self.render_preview(&c, cx)))

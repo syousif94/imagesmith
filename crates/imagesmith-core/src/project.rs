@@ -157,6 +157,69 @@ impl Project {
         std::fs::write(dir.join(RECIPE), text)?;
         Project::open(dir)
     }
+
+    /// Moves the folder to `dest` (which must not exist) and keeps the project ID.
+    pub fn move_to(&mut self, dest: &Path) -> Result<()> {
+        if dest.exists() {
+            return Err(Error::Other(format!("{} already exists", dest.display())));
+        }
+        let parent = dest.parent().ok_or_else(|| Error::Other("invalid destination".into()))?.canonicalize()?;
+        if parent.starts_with(&self.path) {
+            return Err(Error::Other("cannot move a project into itself".into()));
+        }
+        let dest = parent.join(dest.file_name().ok_or_else(|| Error::Other("invalid destination".into()))?);
+        match std::fs::rename(&self.path, &dest) {
+            Ok(()) => {}
+            // EXDEV: another volume.
+            Err(e) if e.raw_os_error() == Some(18) => {
+                if let Err(e) = copy_tree(&self.path, &dest) {
+                    let _ = std::fs::remove_dir_all(&dest);
+                    return Err(e.into());
+                }
+                std::fs::remove_dir_all(&self.path)?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        ProjectIndex::load().relocate(&self.id, &dest)?;
+        self.path = dest;
+        Ok(())
+    }
+}
+
+/// Copies a tree, keeping symlinks as symlinks.
+pub fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let m = std::fs::symlink_metadata(src)?;
+    if m.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for e in std::fs::read_dir(src)? {
+            let e = e?;
+            copy_tree(&e.path(), &dst.join(e.file_name()))?;
+        }
+    } else if m.file_type().is_symlink() {
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
+    } else {
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
+/// Project folders at `dir` or up to `depth` levels below it.
+pub fn find_projects(dir: &Path, depth: usize) -> Vec<PathBuf> {
+    if dir.join(RECIPE).is_file() {
+        return vec![dir.to_path_buf()];
+    }
+    if depth == 0 {
+        return Vec::new();
+    }
+    let mut subs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.path())
+        .collect();
+    subs.sort();
+    subs.iter().flat_map(|s| find_projects(s, depth - 1)).collect()
 }
 
 /// Written next to the artifacts so the sidebar can list builds without
@@ -246,6 +309,25 @@ impl ProjectIndex {
         Ok(())
     }
 
+    /// Lists `ids` first, in that order; the rest keep their relative order.
+    pub fn set_order(&mut self, ids: &[String]) -> Result<()> {
+        self.projects.sort_by_key(|e| ids.iter().position(|i| *i == e.id).unwrap_or(usize::MAX));
+        self.save()
+    }
+
+    pub fn relocate(&mut self, id: &str, path: &Path) -> Result<()> {
+        self.projects.retain(|e| e.id == id || e.path != path);
+        if let Some(e) = self.projects.iter_mut().find(|e| e.id == id) {
+            e.path = path.to_path_buf();
+        }
+        self.save()
+    }
+
+    pub fn remove(&mut self, id: &str) -> Result<()> {
+        self.projects.retain(|e| e.id != id);
+        self.save()
+    }
+
     pub fn set_last_build(&mut self, id: &str, build: &str) -> Result<()> {
         if let Some(e) = self.projects.iter_mut().find(|e| e.id == id) {
             e.last_build = Some(build.to_string());
@@ -264,5 +346,18 @@ mod tests {
         let id = new_build_id();
         assert_eq!(id.len(), "2026-10-30T1412-a1b2".len());
         assert!(id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    }
+
+    #[test]
+    fn finds_nested_projects() {
+        let t = std::env::temp_dir().join(format!("imagesmith-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        for d in ["a", "b/c", "a/inner", ".hidden", "d/e/f"] {
+            std::fs::create_dir_all(t.join(d)).unwrap();
+            std::fs::write(t.join(d).join(RECIPE), "").unwrap();
+        }
+        let found = find_projects(&t, 2);
+        let _ = std::fs::remove_dir_all(&t);
+        assert_eq!(found, vec![t.join("a"), t.join("b/c")]);
     }
 }

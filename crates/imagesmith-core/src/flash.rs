@@ -764,13 +764,13 @@ fn eject(device: &Path) {
     };
 }
 
+/// Error raised when macOS privacy settings block the device.
+pub const PRIVACY_BLOCKED: &str = "Please allow Full Disk Access for ImageSmith, then try again.";
+
 fn open_failed(node: &Path, what: &str, e: std::io::Error) -> Error {
     // Root still gets EPERM when macOS privacy settings deny removable volumes to the app.
     if cfg!(target_os = "macos") && e.raw_os_error() == Some(libc::EPERM) {
-        return Error::Other(format!(
-            "macOS blocked access to {}. Allow it in System Settings → Privacy & Security → Files & Folders → Removable Volumes (or Full Disk Access), then try again.",
-            node.display()
-        ));
+        return Error::Other(PRIVACY_BLOCKED.into());
     }
     Error::Other(format!("cannot open {} {what}: {e}", node.display()))
 }

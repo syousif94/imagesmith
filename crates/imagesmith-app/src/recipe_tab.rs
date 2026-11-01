@@ -326,7 +326,7 @@ impl Workspace {
                         "users",
                         edits::table_from(&[
                             ("name", Value::from(v.as_str())),
-                            ("groups", edits::str_array(&["sudo"])),
+                            ("groups", edits::str_array(if v == "root" { &[] } else { &["sudo"] })),
                             ("ssh_keys", edits::str_array(&[])),
                             ("password", Value::from("locked")),
                         ]),
@@ -551,28 +551,51 @@ impl Workspace {
         self.close_sheet(window, cx);
     }
 
-    fn add_ssh_key(&mut self, user: usize, cx: &mut Context<Self>) {
+    /// Menu of the Mac's ~/.ssh/*.pub keys not yet on `user`, plus a file chooser.
+    fn open_ssh_key_menu(&mut self, user: usize, pos: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let have: Vec<String> = self
+            .active()
+            .and_then(|p| p.recipe.as_ref())
+            .and_then(|r| r.recipe.users.get(user))
+            .map(|u| u.ssh_keys.clone())
+            .unwrap_or_default();
+        let mut items: Vec<(SharedString, crate::workspace::MenuAction)> = local_public_keys()
+            .into_iter()
+            .filter(|k| !have.contains(&self.rel_to_project(k)))
+            .map(|k| {
+                let name = k.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                (format!("{name}  ·  {}", key_description(&k).trim()).into(), crate::workspace::MenuAction::AddSshKey(user, k))
+            })
+            .collect();
+        items.push(("Choose File…".into(), crate::workspace::MenuAction::ChooseSshKey(user)));
+        self.menu = Some(crate::workspace::ContextMenu { pos, items });
+        cx.notify();
+    }
+
+    pub(crate) fn add_ssh_keys(&mut self, user: usize, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        let keys: Vec<String> = paths.iter().map(|p| self.rel_to_project(p)).collect();
+        self.edit_active(
+            move |d| {
+                if let Some(t) = edits::aot_entry(d, "users", user) {
+                    let a = t.entry("ssh_keys").or_insert(toml_edit::value(toml_edit::Array::new()));
+                    if let Some(a) = a.as_array_mut() {
+                        for k in &keys {
+                            if !a.iter().any(|x| x.as_str() == Some(k)) {
+                                a.push(k.as_str());
+                            }
+                        }
+                    }
+                }
+            },
+            cx,
+        );
+    }
+
+    pub(crate) fn choose_ssh_keys(&mut self, user: usize, cx: &mut Context<Self>) {
         let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Add Public Key".into()) });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                let _ = this.update(cx, |this, cx| {
-                    let keys: Vec<String> = paths.iter().map(|p| this.rel_to_project(p)).collect();
-                    this.edit_active(
-                        move |d| {
-                            if let Some(t) = edits::aot_entry(d, "users", user) {
-                                let a = t.entry("ssh_keys").or_insert(toml_edit::value(toml_edit::Array::new()));
-                                if let Some(a) = a.as_array_mut() {
-                                    for k in &keys {
-                                        if !a.iter().any(|x| x.as_str() == Some(k)) {
-                                            a.push(k.as_str());
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        cx,
-                    );
-                });
+                let _ = this.update(cx, |this, cx| this.add_ssh_keys(user, &paths, cx));
             }
         })
         .detach();
@@ -1226,7 +1249,13 @@ impl Workspace {
                 );
             }
             keys = keys.child(
-                div().flex().child(button(("add-key", ui), "Add Key…", Kind::Normal, true, c).on_click(cx.listener(move |this, _, _, cx| this.add_ssh_key(ui, cx)))),
+                div().flex().child(button(("add-key", ui), "Add Key…", Kind::Normal, true, c).on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                        this.open_ssh_key_menu(ui, e.position, cx);
+                        cx.stop_propagation();
+                    }),
+                )),
             );
             let mut gtok = div().flex().flex_wrap().items_center().gap(px(6.));
             for (gi, g) in u.groups.iter().enumerate() {
@@ -1254,7 +1283,13 @@ impl Workspace {
             let n_keys = u.ssh_keys.len();
             let summary = format!(
                 "{}{} SSH key{}",
-                if admin { "Administrator · " } else { "" },
+                if u.name == "root" {
+                    "Superuser · "
+                } else if admin {
+                    "Administrator · "
+                } else {
+                    ""
+                },
                 n_keys,
                 if n_keys == 1 { "" } else { "s" }
             );
@@ -1316,24 +1351,27 @@ impl Workspace {
             ];
             users_body.push(group(rows, c).into_any_element());
         }
-        users_body.push(
-            group(
-                [setting_row("Add a user", Some("Creates a new account on the image.".into()), c)
-                    .child(div().w(px(180.)).child(ad(Adder::User)))
-                    .child(button("add-user", "Add", Kind::Normal, true, c).on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(e) = this.recipe_ui.inputs.as_ref().map(|i| i.adder(Adder::User)) {
-                            let v = e.read(cx).text().trim().to_string();
-                            if !v.is_empty() {
-                                this.add_token(Adder::User, &v, cx);
-                                e.update(cx, |i, cx| i.set_text("", cx));
-                            }
-                        }
-                    })))
-                    .into_any_element()],
-                c,
-            )
-            .into_any_element(),
-        );
+        let has_root = r.users.iter().any(|u| u.name == "root");
+        let mut add_rows = vec![setting_row("Add a user", Some("Creates a new account on the image.".into()), c)
+            .child(div().w(px(180.)).child(ad(Adder::User)))
+            .child(button("add-user", "Add", Kind::Normal, true, c).on_click(cx.listener(|this, _, _, cx| {
+                if let Some(e) = this.recipe_ui.inputs.as_ref().map(|i| i.adder(Adder::User)) {
+                    let v = e.read(cx).text().trim().to_string();
+                    if !v.is_empty() {
+                        this.add_token(Adder::User, &v, cx);
+                        e.update(cx, |i, cx| i.set_text("", cx));
+                    }
+                }
+            })))
+            .into_any_element()];
+        if !has_root {
+            add_rows.push(
+                setting_row("Root sign-in", Some("Lets your SSH keys sign in as root.".into()), c)
+                    .child(button("add-root", "Add Root", Kind::Normal, true, c).on_click(cx.listener(|this, _, _, cx| this.add_token(Adder::User, "root", cx))))
+                    .into_any_element(),
+            );
+        }
+        users_body.push(group(add_rows, c).into_any_element());
         out.push(self.section("users", "Accounts that can sign in to the device.", users_body, c));
 
         // ---------------------------------------------------------- System
@@ -1676,6 +1714,14 @@ pub fn collapse_home(p: &Path) -> String {
         }
     }
     p.to_string_lossy().into_owned()
+}
+
+fn local_public_keys() -> Vec<std::path::PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(Path::new(&home).join(".ssh")) else { return Vec::new() };
+    let mut keys: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "pub")).collect();
+    keys.sort();
+    keys
 }
 
 /// "ed25519 · user@host" from a public key file, or why it's unusable.

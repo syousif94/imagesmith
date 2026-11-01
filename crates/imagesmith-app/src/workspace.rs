@@ -81,6 +81,7 @@ pub struct ProjectState {
     pub probe: Option<Probe>,
     pub mtime: Option<SystemTime>,
     pub has_stage: bool,
+    pub moving: bool,
 }
 
 impl ProjectState {
@@ -95,6 +96,7 @@ impl ProjectState {
             probe: None,
             mtime: None,
             has_stage: false,
+            moving: false,
         };
         p.reload();
         p.has_stage = !p.builds.is_empty();
@@ -136,6 +138,13 @@ impl ProjectState {
 
     /// Applies a document edit, saves, and re-validates.
     pub fn edit(&mut self, f: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<(), String> {
+        // Don't overwrite changes made outside the app since the last poll.
+        if self.recipe_mtime() != self.mtime {
+            self.reload();
+        }
+        if self.parse_error.is_some() {
+            return Err("recipe has a parse error".into());
+        }
         let rf = self.recipe.as_mut().ok_or("recipe has a parse error")?;
         rf.update(f).map_err(|e| e.to_string())?;
         self.text = rf.doc.to_string();
@@ -160,7 +169,7 @@ impl ProjectState {
     }
 
     pub fn can_build(&self) -> bool {
-        self.recipe.is_some() && self.parse_error.is_none() && !has_errors(&self.diagnostics)
+        !self.moving && self.recipe.is_some() && self.parse_error.is_none() && !has_errors(&self.diagnostics)
     }
 }
 
@@ -243,6 +252,40 @@ pub enum Sheet {
     HostScripts { project_id: String, scripts: Vec<imagesmith_core::recipe::Step> },
     Repo(RepoSheet),
     Flash(FlashSheet),
+    Rename(RenameSheet),
+}
+
+pub struct RenameSheet {
+    pub project_id: String,
+    pub name: Entity<TextInput>,
+    pub rename_folder: bool,
+    pub busy: bool,
+    pub error: Option<String>,
+    _sub: Subscription,
+}
+
+/// A sidebar project row being dragged to a new position.
+pub struct DraggedProject {
+    pub ix: usize,
+    pub name: SharedString,
+}
+
+impl Render for DraggedProject {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let c = Colors::get(window, cx);
+        div()
+            .px(px(10.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .bg(c.surface)
+            .border_1()
+            .border_color(c.border)
+            .shadow_lg()
+            .font_family(UI_FONT)
+            .text_size(px(13.))
+            .text_color(c.text)
+            .child(self.name.clone())
+    }
 }
 
 /// Add or edit an extra apt repository.
@@ -311,17 +354,24 @@ pub enum FlashMsg {
 
 #[derive(Clone)]
 pub enum MenuAction {
+    NewProject,
+    ImportProjects,
     RevealProject(usize),
+    RenameProject(usize),
+    MoveProject(usize),
     DuplicateProject(usize),
     RemoveProject(usize),
+    DeleteProject(usize),
     RevealBuild(PathBuf),
     DeleteBuild(usize, String),
     RebuildWith(usize, PathBuf),
+    AddSshKey(usize, PathBuf),
+    ChooseSshKey(usize),
 }
 
 pub struct ContextMenu {
     pub pos: Point<Pixels>,
-    pub items: Vec<(&'static str, MenuAction)>,
+    pub items: Vec<(SharedString, MenuAction)>,
 }
 
 // ---------------------------------------------------------------- workspace
@@ -625,12 +675,12 @@ impl Workspace {
 
     /// Picks up hand edits to recipe.toml and stops the idle store container.
     fn poll(&mut self, cx: &mut Context<Self>) {
-        if let Some(i) = self.active {
-            let p = &mut self.projects[i];
-            let m = p.recipe_mtime();
-            if m != p.mtime {
+        for (i, p) in self.projects.iter_mut().enumerate() {
+            if !p.moving && p.recipe_mtime() != p.mtime {
                 p.reload();
-                self.recipe_ui.dirty = true;
+                if self.active == Some(i) {
+                    self.recipe_ui.dirty = true;
+                }
                 cx.notify();
             }
         }
@@ -1046,17 +1096,32 @@ impl Workspace {
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
-            multiple: false,
-            prompt: Some("Open Project".into()),
+            multiple: true,
+            prompt: Some("Open".into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(p) = paths.into_iter().next() {
-                    let _ = this.update(cx, |this, cx| this.open_path(&p, cx));
-                }
+                let _ = this.update(cx, |this, cx| this.import_folders(&paths, cx));
             }
         })
         .detach();
+    }
+
+    /// Opens every project in `dirs`, including ones a couple of levels down.
+    pub fn import_folders(&mut self, dirs: &[PathBuf], cx: &mut Context<Self>) {
+        let found: Vec<PathBuf> = dirs.iter().flat_map(|d| imagesmith_core::project::find_projects(d, 2)).collect();
+        match found.len() {
+            0 => self.toast("No ImageSmith projects (folders with a recipe.toml) found there", cx),
+            1 => self.open_path(&found[0], cx),
+            n => {
+                let before = self.projects.len();
+                for p in &found {
+                    self.open_path(p, cx);
+                }
+                let added = self.projects.len() - before;
+                self.toast(format!("Opened {n} projects ({added} new)"), cx);
+            }
+        }
     }
 
     pub fn open_path(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -1172,6 +1237,12 @@ impl Workspace {
     fn run_menu_action(&mut self, a: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         match a {
+            MenuAction::NewProject => self.new_project(window, cx),
+            MenuAction::ImportProjects => self.open_project_dialog(cx),
+            MenuAction::AddSshKey(u, path) => self.add_ssh_keys(u, &[path], cx),
+            MenuAction::ChooseSshKey(u) => self.choose_ssh_keys(u, cx),
+            MenuAction::RenameProject(i) => self.start_rename(i, window, cx),
+            MenuAction::MoveProject(i) => self.choose_project_destination(i, cx),
             MenuAction::RevealProject(i) => cx.reveal_path(&self.projects[i].project.path.join(imagesmith_core::project::RECIPE)),
             MenuAction::RevealBuild(dir) => cx.reveal_path(&dir),
             MenuAction::DuplicateProject(i) => {
@@ -1199,6 +1270,7 @@ impl Workspace {
                 let next = if self.projects.is_empty() { None } else { Some(i.min(self.projects.len() - 1)) };
                 self.activate(next, window, cx);
             }
+            MenuAction::DeleteProject(i) => self.confirm_delete_project(i, window, cx),
             MenuAction::DeleteBuild(i, id) => {
                 let dir = self.projects[i].project.builds_dir().join(&id);
                 let rx = window.prompt(
@@ -1260,10 +1332,246 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Sidebar drag and drop: moves project `from` to position `to` and persists the order.
+    pub fn reorder_project(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to || from >= self.projects.len() || to >= self.projects.len() {
+            return;
+        }
+        let active_id = self.active().map(|p| p.id().to_string());
+        let p = self.projects.remove(from);
+        self.projects.insert(to, p);
+        self.active = active_id.and_then(|id| self.projects.iter().position(|p| p.id() == id));
+        self.menu = None;
+        let ids: Vec<String> = self.projects.iter().map(|p| p.id().to_string()).collect();
+        if let Err(e) = ProjectIndex::load().set_order(&ids) {
+            self.toast(format!("Cannot save the project order: {e}"), cx);
+        }
+        cx.notify();
+    }
+
+    /// Why the project's folder can't be renamed or moved right now, if anything.
+    fn folder_busy(&self, i: usize) -> Option<&'static str> {
+        let id = self.projects[i].id();
+        if self.projects[i].moving {
+            return Some("The project is being moved");
+        }
+        if self.is_building(id) || self.queue.iter().any(|(p, _)| p == id) {
+            return Some("Cannot move a project while it builds");
+        }
+        if self.sheet.is_some() {
+            return Some("Close the open sheet first");
+        }
+        None
+    }
+
+    fn confirm_delete_project(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = self.folder_busy(i) {
+            self.toast(why, cx);
+            return;
+        }
+        let p = &self.projects[i];
+        let (pid, path) = (p.id().to_string(), p.project.path.clone());
+        let rx = window.prompt(
+            PromptLevel::Warning,
+            &format!("Move “{}” to the Trash?", p.name()),
+            Some(&format!("{} moves to the Trash with its builds. Its stage in the builder store and its assistant chats are deleted.", path.display())),
+            &["Move to Trash", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if rx.await.ok() != Some(0) {
+                return;
+            }
+            let trash = path.clone();
+            let r = cx
+                .background_spawn(async move {
+                    let out = std::process::Command::new("/usr/bin/trash").arg(&trash).output().map_err(|e| e.to_string())?;
+                    if out.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Err(e) = r {
+                    this.toast(format!("Could not move the project to the Trash: {e}"), cx);
+                    return;
+                }
+                this.forget_project(&pid, window, cx);
+                this.toast("Moved to the Trash", cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Drops every trace of a project whose folder is gone.
+    fn forget_project(&mut self, pid: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = ProjectIndex::load().remove(pid);
+        let _ = std::fs::remove_file(crate::assistant::chats_file(pid));
+        self.assistant.chats.remove(pid);
+        self.files.remove(pid);
+        self.shown.remove(pid);
+        self.selected_build.remove(pid);
+        self.queue.retain(|(p, _)| p != pid);
+        if self.runtime == RuntimeStatus::Ready {
+            let rt = runtime(cx);
+            let dir = format!("{STORE_MOUNT}/projects/{pid}");
+            cx.background_spawn(async move {
+                if rt.ensure_store(&mut |_| {}).is_ok() {
+                    let _ = rt.exec(false, &["rm", "-rf", &dir]).stdin(Stdio::null()).status();
+                }
+            })
+            .detach();
+        }
+        let Some(i) = self.projects.iter().position(|p| p.id() == pid) else { return };
+        let was_active = self.active == Some(i);
+        self.projects.remove(i);
+        let next = if was_active {
+            if self.projects.is_empty() { None } else { Some(i.min(self.projects.len() - 1)) }
+        } else {
+            self.active.map(|a| if a > i { a - 1 } else { a })
+        };
+        self.activate(next, window, cx);
+    }
+
+    pub fn start_rename(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let p = &self.projects[i];
+        let current = p.name();
+        let folder_matches = p.project.path.file_name().is_some_and(|f| f.to_string_lossy() == current);
+        let project_id = p.id().to_string();
+        let name = cx.new(|cx| {
+            let mut t = TextInput::new(cx, "Name");
+            t.set_text(current, cx);
+            t
+        });
+        let sub = cx.subscribe_in(&name, window, |this, _, e: &InputEvent, window, cx| {
+            if matches!(e, InputEvent::Submit) {
+                this.save_rename(window, cx);
+            }
+        });
+        window.focus(&name.focus_handle(cx));
+        self.sheet = Some(Sheet::Rename(RenameSheet { project_id, name, rename_folder: folder_matches, busy: false, error: None, _sub: sub }));
+        cx.notify();
+    }
+
+    pub fn save_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Sheet::Rename(s)) = &self.sheet else { return };
+        if s.busy {
+            return;
+        }
+        let name = s.name.read(cx).text().trim().to_string();
+        let (pid, rename_folder) = (s.project_id.clone(), s.rename_folder);
+        let Some(i) = self.projects.iter().position(|p| p.id() == pid) else { return };
+        let dest = self.projects[i].project.path.with_file_name(&name);
+        let move_folder = rename_folder && dest != self.projects[i].project.path;
+        let error = if name.is_empty() || name.starts_with('.') || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+            Some("Use letters, digits, . _ and - only".to_string())
+        } else if move_folder && (self.is_building(&pid) || self.queue.iter().any(|(p, _)| *p == pid) || self.projects[i].moving) {
+            Some("Cannot rename the folder while the project builds".to_string())
+        } else if move_folder && dest.exists() {
+            Some(format!("{} already exists", dest.display()))
+        } else {
+            self.projects[i].edit(|doc| crate::edits::set_str(doc, "image", "name", &name)).err().map(|e| format!("Cannot update recipe.toml: {e}"))
+        };
+        if let Some(e) = error {
+            if let Some(Sheet::Rename(s)) = &mut self.sheet {
+                s.error = Some(e);
+            }
+            cx.notify();
+            return;
+        }
+        if self.active == Some(i) {
+            self.recipe_ui.dirty = true;
+            window.set_window_title(&format!("{name} — ImageSmith"));
+        }
+        if move_folder {
+            if let Some(Sheet::Rename(s)) = &mut self.sheet {
+                s.busy = true;
+            }
+            self.relocate_project(pid, dest, cx);
+        } else {
+            self.close_sheet(window, cx);
+        }
+    }
+
+    pub fn choose_project_destination(&mut self, i: usize, cx: &mut Context<Self>) {
+        if let Some(why) = self.folder_busy(i) {
+            self.toast(why, cx);
+            return;
+        }
+        let pid = self.projects[i].id().to_string();
+        let rx = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Move Here".into()) });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = rx.await {
+                if let Some(parent) = paths.into_iter().next() {
+                    let _ = this.update(cx, |this, cx| {
+                        let Some(i) = this.projects.iter().position(|p| p.id() == pid) else { return };
+                        if let Some(why) = this.folder_busy(i) {
+                            this.toast(why, cx);
+                            return;
+                        }
+                        let src = &this.projects[i].project.path;
+                        if src.parent() == Some(parent.as_path()) {
+                            return;
+                        }
+                        let dest = parent.join(src.file_name().unwrap_or_default());
+                        this.relocate_project(pid, dest, cx);
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Moves the project folder off the UI thread (it may cross volumes) and
+    /// points the app at the new location.
+    fn relocate_project(&mut self, pid: String, dest: PathBuf, cx: &mut Context<Self>) {
+        let Some(p) = self.projects.iter_mut().find(|p| p.id() == pid) else { return };
+        p.moving = true;
+        let mut project = Project { path: p.project.path.clone(), id: pid.clone() };
+        self.toast(format!("Moving to {} …", dest.display()), cx);
+        let task = cx.background_spawn(async move { project.move_to(&dest).map(|_| project.path).map_err(|e| e.to_string()) });
+        cx.spawn(async move |this, cx| {
+            let r = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let rename_open = matches!(&this.sheet, Some(Sheet::Rename(s)) if s.project_id == pid);
+                if rename_open {
+                    match &r {
+                        Ok(_) => this.sheet = None,
+                        Err(e) => {
+                            if let Some(Sheet::Rename(s)) = &mut this.sheet {
+                                s.busy = false;
+                                s.error = Some(format!("Cannot rename the folder: {e}"));
+                            }
+                        }
+                    }
+                }
+                match r {
+                    Ok(path) => {
+                        if let Some(p) = this.projects.iter_mut().find(|p| p.id() == pid) {
+                            p.moving = false;
+                            p.project.path = path.clone();
+                            p.reload();
+                        }
+                        this.recipe_ui.dirty = true;
+                        this.output_cache = None;
+                        this.toast(format!("Moved to {}", path.display()), cx);
+                    }
+                    Err(e) => {
+                        if let Some(p) = this.projects.iter_mut().find(|p| p.id() == pid) {
+                            p.moving = false;
+                        }
+                        this.toast(format!("Move failed: {e}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn on_drop_paths(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = paths.paths().first().cloned() else { return };
-        if path.is_dir() && path.join(imagesmith_core::project::RECIPE).is_file() {
-            self.open_path(&path, cx);
+        if path.is_dir() {
+            let dirs: Vec<PathBuf> = paths.paths().iter().filter(|p| p.is_dir()).cloned().collect();
+            self.import_folders(&dirs, cx);
             return;
         }
         let lower = path.to_string_lossy().to_lowercase();
@@ -1378,6 +1686,8 @@ impl Workspace {
                 }
             };
             let hover = c.hover;
+            let accent = c.accent;
+            let name = p.name();
             list = list.child(
                 div()
                     .id(("project", i))
@@ -1387,12 +1697,24 @@ impl Workspace {
                     .px(px(8.))
                     .h(px(28.))
                     .rounded(px(6.))
+                    .border_y_2()
+                    .border_color(gpui::transparent_black())
                     .cursor_pointer()
                     .when(selected, |d| d.bg(c.selected).font_weight(gpui::FontWeight::SEMIBOLD))
                     .when(!selected, move |d| d.hover(move |s| s.bg(hover)))
                     .child(div().size(px(7.)).rounded_full().bg(dot))
-                    .child(div().flex_1().overflow_hidden().text_ellipsis().whitespace_nowrap().child(p.name()))
+                    .child(div().flex_1().overflow_hidden().text_ellipsis().whitespace_nowrap().child(name.clone()))
                     .child(div().text_size(px(11.)).text_color(c.muted).child(p.arch()))
+                    .on_drag(DraggedProject { ix: i, name: name.into() }, |d, _, _, cx| cx.new(|_| DraggedProject { ix: d.ix, name: d.name.clone() }))
+                    .drag_over::<DraggedProject>(move |s, d, _, _| {
+                        // Rows have a transparent 2px top and bottom border; light the side the item lands on.
+                        match d.ix.cmp(&i) {
+                            std::cmp::Ordering::Less => s.border_b_2().border_color(accent).border_t_0(),
+                            std::cmp::Ordering::Greater => s.border_t_2().border_color(accent).border_b_0(),
+                            std::cmp::Ordering::Equal => s,
+                        }
+                    })
+                    .on_drop(cx.listener(move |this, d: &DraggedProject, _, cx| this.reorder_project(d.ix, i, cx)))
                     .on_click(cx.listener(move |this, _, w, cx| this.activate(Some(i), w, cx)))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -1400,9 +1722,12 @@ impl Workspace {
                             this.menu = Some(ContextMenu {
                                 pos: e.position,
                                 items: vec![
-                                    ("Reveal in Finder", MenuAction::RevealProject(i)),
-                                    ("Duplicate", MenuAction::DuplicateProject(i)),
-                                    ("Remove from List", MenuAction::RemoveProject(i)),
+                                    ("Reveal in Finder".into(), MenuAction::RevealProject(i)),
+                                    ("Rename…".into(), MenuAction::RenameProject(i)),
+                                    ("Move Folder…".into(), MenuAction::MoveProject(i)),
+                                    ("Duplicate".into(), MenuAction::DuplicateProject(i)),
+                                    ("Remove from List".into(), MenuAction::RemoveProject(i)),
+                                    ("Move to Trash…".into(), MenuAction::DeleteProject(i)),
                                 ],
                             });
                             cx.notify();
@@ -1483,9 +1808,9 @@ impl Workspace {
                                 this.menu = Some(ContextMenu {
                                     pos: e.position,
                                     items: vec![
-                                        ("Reveal in Finder", MenuAction::RevealBuild(dir.clone())),
-                                        ("Delete Build…", MenuAction::DeleteBuild(ai, id2.clone())),
-                                        ("Rebuild with This Recipe…", MenuAction::RebuildWith(ai, dir.clone())),
+                                        ("Reveal in Finder".into(), MenuAction::RevealBuild(dir.clone())),
+                                        ("Delete Build…".into(), MenuAction::DeleteBuild(ai, id2.clone())),
+                                        ("Rebuild with This Recipe…".into(), MenuAction::RebuildWith(ai, dir.clone())),
                                     ],
                                 });
                                 cx.notify();
@@ -1524,9 +1849,19 @@ impl Workspace {
                             .cursor_pointer()
                             .text_color(c.muted)
                             .hover(|s| s.bg(c.hover))
-                            .tooltip(tooltip("New Project (⌘N)"))
+                            .tooltip(tooltip("New or open projects"))
                             .child("+")
-                            .on_click(cx.listener(|this, _, w, cx| this.new_project(w, cx))),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                                    this.menu = Some(ContextMenu {
+                                        pos: e.position,
+                                        items: vec![("New Project…".into(), MenuAction::NewProject), ("Open Existing Projects…".into(), MenuAction::ImportProjects)],
+                                    });
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }),
+                            ),
                     ),
             )
             .child(list)
@@ -1652,7 +1987,7 @@ impl Workspace {
                     .text_size(px(13.))
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover).text_color(fg))
-                    .child(*label)
+                    .child(label.clone())
                     .on_click(cx.listener(move |this, _, w, cx| this.run_menu_action(a.clone(), w, cx))),
             );
         }
@@ -1913,23 +2248,7 @@ fn copy_project(src: &Path, dst: &Path) -> std::io::Result<()> {
             std::fs::create_dir_all(dst.join(&name))?;
             continue;
         }
-        copy_tree(&e.path(), &dst.join(&name))?;
-    }
-    Ok(())
-}
-
-fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
-    let m = std::fs::symlink_metadata(src)?;
-    if m.is_dir() {
-        std::fs::create_dir_all(dst)?;
-        for e in std::fs::read_dir(src)? {
-            let e = e?;
-            copy_tree(&e.path(), &dst.join(e.file_name()))?;
-        }
-    } else if m.file_type().is_symlink() {
-        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
-    } else {
-        std::fs::copy(src, dst)?;
+        imagesmith_core::project::copy_tree(&e.path(), &dst.join(&name))?;
     }
     Ok(())
 }

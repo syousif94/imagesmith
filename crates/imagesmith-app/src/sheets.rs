@@ -10,6 +10,12 @@ use imagesmith_core::size::human;
 
 const CONTAINER_URL: &str = "https://github.com/apple/container/releases";
 
+fn open_full_disk_access() {
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn();
+}
+
 impl Workspace {
     pub fn render_sheet(&mut self, c: &Colors, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let large = matches!(self.sheet, Some(Sheet::Shell { .. } | Sheet::Step { .. }));
@@ -420,6 +426,14 @@ impl Workspace {
                     .children(bar)
                     .children(blocker.filter(|_| !s.busy).map(|b| div().text_size(px(12.5)).text_color(c.warning).child(b)))
                     .children(s.error.clone().map(|e| div().text_color(c.danger).child(e)))
+                    .when(s.error.as_deref().is_some_and(|e| e.contains(imagesmith_core::flash::PRIVACY_BLOCKED)), |d| {
+                        d.child(
+                            div().flex().child(
+                                button("flash-open-fda", "Open Full Disk Access", Kind::Normal, true, c)
+                                    .on_click(|_, _, _| open_full_disk_access()),
+                            ),
+                        )
+                    })
                     .children(s.done.clone().map(|d| div().text_color(c.accent).child(d)))
                     .child(
                         div()
@@ -442,6 +456,40 @@ impl Workspace {
                                         .on_click_if(can_start, cx.listener(|this, _, _, cx| this.start_flash(cx))),
                                 )
                             }),
+                    )
+                    .into_any_element()
+            }
+            Sheet::Rename(s) => {
+                let busy = s.busy;
+                let path = self.projects.iter().find(|p| p.id() == s.project_id).map(|p| p.project.path.display().to_string()).unwrap_or_default();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .w(px(460.))
+                    .child(div().text_size(px(17.)).font_weight(gpui::FontWeight::SEMIBOLD).child("Rename Project"))
+                    .child(div().text_size(px(12.5)).text_color(c.muted).child("Sets [image].name, which also names the built image files."))
+                    .child(field_row("Name", c).child(div().flex_1().child(s.name.clone())))
+                    .child(
+                        checkbox("rename-folder", s.rename_folder, "Rename the folder too", c).on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(Sheet::Rename(s)) = &mut this.sheet {
+                                s.rename_folder = !s.rename_folder;
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .child(div().text_size(px(11.5)).text_color(c.faint).font_family(MONO).child(path))
+                    .children(s.error.clone().map(|e| div().text_color(c.danger).child(e)))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap(px(8.))
+                            .child(button("rename-cancel", "Cancel", Kind::Normal, !busy, c).on_click_if(!busy, cx.listener(|this, _, w, cx| this.close_sheet(w, cx))))
+                            .child(
+                                button("rename-save", if busy { "Renaming…" } else { "Rename" }, Kind::Primary, !busy, c)
+                                    .on_click_if(!busy, cx.listener(|this, _, w, cx| this.save_rename(w, cx))),
+                            ),
                     )
                     .into_any_element()
             }
