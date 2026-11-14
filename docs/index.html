@@ -16,7 +16,7 @@
         --border: #3d3d43;
         --text: #e8e8ea;
         --muted: #a0a0a8;
-        --accent: #4a8fe7;
+        --accent: #0071e3;
       }
       * {
         box-sizing: border-box;
@@ -35,21 +35,25 @@
       main {
         max-width: 880px;
         margin: 0 auto;
-        padding: 72px 24px;
+        padding: 32px 24px 72px;
       }
       header {
         text-align: center;
-        margin-top: 64px;
+        margin-bottom: 28px;
       }
       h1 {
-        font-size: 48px;
-        margin: 16px 0 8px;
+        font-size: 36px;
+        margin: 0 0 6px;
         letter-spacing: -0.02em;
       }
       .tagline {
         color: var(--muted);
-        font-size: 20px;
-        margin: 0 0 32px;
+        font-size: 18px;
+        margin: 0;
+      }
+      .cta {
+        text-align: center;
+        margin-top: 28px;
       }
       .btn {
         display: inline-block;
@@ -57,7 +61,7 @@
         color: #fff;
         text-decoration: none;
         padding: 12px 28px;
-        border-radius: 10px;
+        border-radius: 980px;
         font-weight: 600;
         font-size: 17px;
       }
@@ -66,24 +70,27 @@
       }
       .meta {
         color: var(--muted);
-        font-size: 14px;
-        margin-top: 12px;
+        font-size: 12px;
+        margin-top: 10px;
       }
       .meta a {
         color: var(--muted);
       }
       .carousel {
         position: relative;
+        /* Screenshots are 16:10; cap their height so the download button stays above the fold. */
+        max-width: min(100%, calc((100vh - 360px) * 1.6));
+        margin: 0 auto;
       }
       .frame {
         position: relative;
       }
       .app-icon {
         position: absolute;
-        right: -32px;
-        bottom: -40px;
-        width: 128px;
-        height: 128px;
+        right: -36px;
+        bottom: -36px;
+        width: 96px;
+        height: 96px;
         filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.5));
         pointer-events: none;
       }
@@ -93,9 +100,6 @@
         scroll-snap-type: x mandatory;
         scroll-behavior: smooth;
         scrollbar-width: none;
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        background: var(--surface);
       }
       .slides::-webkit-scrollbar {
         display: none;
@@ -109,12 +113,17 @@
         display: block;
         width: 100%;
         height: auto;
+        border-radius: 12px;
+        border: 1px solid var(--border);
       }
       .slides figcaption {
+        display: none;
+      }
+      .caption {
         text-align: center;
-        color: var(--muted);
+        color: #fff;
         font-size: 14px;
-        padding: 10px;
+        margin: 16px 0 0;
       }
       .nav {
         position: absolute;
@@ -145,16 +154,16 @@
         margin-top: 12px;
       }
       .dots button {
-        width: 8px;
-        height: 8px;
+        width: 6px;
+        height: 6px;
         padding: 0;
         border: 0;
         border-radius: 50%;
-        background: var(--border);
+        background: rgba(255, 255, 255, 0.35);
         cursor: pointer;
       }
       .dots button.active {
-        background: var(--accent);
+        background: #fff;
       }
       @media (max-width: 960px) {
         .nav.prev {
@@ -221,6 +230,14 @@
   </head>
   <body data-repo="syousif94/imagesmith">
     <main>
+      <header>
+        <h1>ImageSmith</h1>
+        <p class="tagline">
+          Customize Linux disk images from a declarative recipe — natively on
+          your Mac.
+        </p>
+      </header>
+
       <div class="carousel" aria-roledescription="carousel">
         <div class="frame">
           <div class="slides">
@@ -241,21 +258,17 @@
           <button class="nav next" aria-label="Next screenshot">&#8250;</button>
           <img class="app-icon" src="icon.png" alt="ImageSmith icon" />
         </div>
+        <p class="caption" aria-live="polite"></p>
         <div class="dots"></div>
       </div>
 
-      <header>
-        <h1>ImageSmith</h1>
-        <p class="tagline">
-          Customize Linux disk images from a declarative recipe — natively on
-          your Mac.
-        </p>
+      <div class="cta">
         <a class="btn" id="download" href="#">Download for macOS</a>
         <div class="meta">
           <span id="version"></span>Requires macOS 26 on Apple silicon ·
           <a id="source" href="#">Source on GitHub</a>
         </div>
-      </header>
+      </div>
 
       <div class="grid">
         <div class="card">
@@ -304,6 +317,7 @@
       {
         const track = document.querySelector('.slides');
         const dots = document.querySelector('.dots');
+        const caption = document.querySelector('.caption');
         const slides = () => [...track.children];
         const current = () => Math.round(track.scrollLeft / track.clientWidth);
         const go = (i) => {
@@ -323,10 +337,13 @@
           );
           sync();
         };
-        const sync = () =>
+        const sync = () => {
           [...dots.children].forEach((d, i) =>
             d.classList.toggle('active', i === current()),
           );
+          caption.textContent =
+            slides()[current()]?.querySelector('figcaption').textContent ?? '';
+        };
         // Drop slides whose screenshot is missing.
         track.querySelectorAll('img').forEach((img) => {
           img.onerror = () => {
