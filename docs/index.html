@@ -39,10 +39,7 @@
       }
       header {
         text-align: center;
-      }
-      header img {
-        width: 128px;
-        height: 128px;
+        margin-top: 64px;
       }
       h1 {
         font-size: 48px;
@@ -77,7 +74,18 @@
       }
       .carousel {
         position: relative;
-        margin-top: 48px;
+      }
+      .frame {
+        position: relative;
+      }
+      .app-icon {
+        position: absolute;
+        right: -32px;
+        bottom: -40px;
+        width: 128px;
+        height: 128px;
+        filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.5));
+        pointer-events: none;
       }
       .slides {
         display: flex;
@@ -155,6 +163,11 @@
         .nav.next {
           right: 8px;
         }
+        .app-icon {
+          right: -8px;
+          width: 96px;
+          height: 96px;
+        }
       }
       .grid {
         display: grid;
@@ -208,8 +221,30 @@
   </head>
   <body data-repo="syousif94/imagesmith">
     <main>
+      <div class="carousel" aria-roledescription="carousel">
+        <div class="frame">
+          <div class="slides">
+            <figure>
+              <img src="screenshots/assistant.png" alt="Assistant" />
+              <figcaption>Ask the built-in assistant to change your recipe</figcaption>
+            </figure>
+            <figure>
+              <img src="screenshots/build.png" alt="Build tab" />
+              <figcaption>Build the image natively</figcaption>
+            </figure>
+            <figure>
+              <img src="screenshots/output.png" alt="Output tab" />
+              <figcaption>Inspect artifacts and what changed, then flash to disk</figcaption>
+            </figure>
+          </div>
+          <button class="nav prev" aria-label="Previous screenshot">&#8249;</button>
+          <button class="nav next" aria-label="Next screenshot">&#8250;</button>
+          <img class="app-icon" src="icon.png" alt="ImageSmith icon" />
+        </div>
+        <div class="dots"></div>
+      </div>
+
       <header>
-        <img src="icon.png" alt="ImageSmith icon" />
         <h1>ImageSmith</h1>
         <p class="tagline">
           Customize Linux disk images from a declarative recipe — natively on
@@ -221,26 +256,6 @@
           <a id="source" href="#">Source on GitHub</a>
         </div>
       </header>
-
-      <div class="carousel" aria-roledescription="carousel">
-        <div class="slides">
-          <figure>
-            <img src="screenshots/assistant.png" alt="Assistant" />
-            <figcaption>Ask the built-in assistant to change your recipe</figcaption>
-          </figure>
-          <figure>
-            <img src="screenshots/build.png" alt="Build tab" />
-            <figcaption>Build the image natively</figcaption>
-          </figure>
-          <figure>
-            <img src="screenshots/output.png" alt="Output tab" />
-            <figcaption>Inspect artifacts and what changed, then flash to disk</figcaption>
-          </figure>
-        </div>
-        <button class="nav prev" aria-label="Previous screenshot">&#8249;</button>
-        <button class="nav next" aria-label="Next screenshot">&#8250;</button>
-        <div class="dots"></div>
-      </div>
 
       <div class="grid">
         <div class="card">
@@ -294,6 +309,8 @@
         const go = (i) => {
           const n = slides().length;
           track.scrollTo({ left: ((i + n) % n) * track.clientWidth });
+          clearInterval(timer);
+          timer = setInterval(() => go(current() + 1), 5000);
         };
         const render = () => {
           dots.replaceChildren(
@@ -314,7 +331,7 @@
         track.querySelectorAll('img').forEach((img) => {
           img.onerror = () => {
             img.closest('figure').remove();
-            if (!track.children.length) track.parentElement.remove();
+            if (!track.children.length) track.closest('.carousel').remove();
             else render();
           };
         });
@@ -322,12 +339,6 @@
         document.querySelector('.nav.next').onclick = () => go(current() + 1);
         track.addEventListener('scroll', sync, { passive: true });
         let timer = setInterval(() => go(current() + 1), 5000);
-        track.parentElement.addEventListener('pointerenter', () =>
-          clearInterval(timer),
-        );
-        track.parentElement.addEventListener('pointerleave', () => {
-          timer = setInterval(() => go(current() + 1), 5000);
-        });
         render();
       }
 
