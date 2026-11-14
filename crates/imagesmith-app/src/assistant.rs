@@ -196,6 +196,7 @@ pub struct AssistantUi {
     /// Thinking boxes shown in full, keyed by (chat id, item index); usize::MAX is the live one.
     pub expanded: std::collections::HashSet<(u64, usize)>,
     think_scrolls: HashMap<(u64, usize), ScrollHandle>,
+    md: crate::markdown::Cache,
     pub input: Entity<TextInput>,
     pub model_picker: Entity<crate::model_picker::ModelPicker>,
     pub scroll: ScrollHandle,
@@ -218,6 +219,7 @@ impl AssistantUi {
             search_open: false,
             expanded: Default::default(),
             think_scrolls: HashMap::new(),
+            md: Default::default(),
             input,
             model_picker,
             scroll: ScrollHandle::new(),
@@ -1127,8 +1129,8 @@ impl Workspace {
                 *s = Some(t.elapsed().as_secs());
             }
             chat.streaming.get_or_insert_with(String::new).push_str(text);
+            self.assistant.scroll.scroll_to_bottom();
         }
-        self.assistant.scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -1646,7 +1648,10 @@ impl Workspace {
                     Item::User(t) => div().flex().justify_end().child(
                         div().max_w(gpui::relative(0.9)).px(px(10.)).py(px(6.)).rounded(px(10.)).bg(c.accent_soft).text_size(px(13.)).child(t.clone()),
                     ),
-                    Item::Assistant(t) => div().text_size(px(13.)).line_height(px(19.)).child(t.clone()),
+                    Item::Assistant(t) => {
+                        let blocks = self.assistant.md.get((cid, ix), t);
+                        div().child(crate::markdown::render(&blocks, format!("md-{cid}-{ix}").into(), c))
+                    }
                     Item::Error(e) => div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(c.danger_soft).text_color(c.danger).text_size(px(12.5)).child(e.clone()),
                     Item::Command(r) => {
                         let waiting = r.state == RunState::Pending && chat.paused.as_ref().is_some_and(|p| p.item == ix);
@@ -1797,7 +1802,10 @@ impl Workspace {
             }
             let on_command = matches!(chat.items.last(), Some(Item::Command(r)) if matches!(r.state, RunState::Pending | RunState::Running));
             match chat.streaming.as_deref().filter(|s| !s.is_empty()) {
-                Some(s) => list = list.child(div().text_size(px(13.)).line_height(px(19.)).child(format!("{s}▍"))),
+                Some(s) => {
+                    let blocks = self.assistant.md.get((cid, usize::MAX), &format!("{s}▍"));
+                    list = list.child(crate::markdown::render(&blocks, format!("md-{cid}-live").into(), c))
+                }
                 None if busy && live_thinking.is_none() && !on_command => list = list.child(div().text_size(px(12.5)).text_color(c.muted).child("Thinking…")),
                 None => {}
             }

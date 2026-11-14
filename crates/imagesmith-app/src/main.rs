@@ -3,9 +3,11 @@ mod build_tab;
 mod editor;
 mod edits;
 mod files_tab;
+mod markdown;
 mod model_picker;
 mod output_tab;
 mod recipe_tab;
+mod selectable;
 mod settings_window;
 mod sheets;
 mod terminal;
@@ -33,6 +35,8 @@ fn bind_keys(cx: &mut App) {
     editor::bind_keys(cx);
     cx.bind_keys([
         KeyBinding::new("cmd-e", files_tab::EditFile, Some("Files")),
+        KeyBinding::new("cmd-c", text_input::Copy, Some("Selectable")),
+        KeyBinding::new("cmd-a", text_input::SelectAll, Some("Selectable")),
         KeyBinding::new("cmd-n", NewProject, None),
         KeyBinding::new("cmd-o", OpenProject, None),
         KeyBinding::new("cmd-b", StartBuild, None),

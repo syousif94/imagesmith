@@ -223,6 +223,13 @@ pub struct LogState {
     pub scroll: UniformListScrollHandle,
     /// (key, absolute line indices) for the current filter.
     pub cache: Option<((u64, u64, String, Option<String>, bool), std::rc::Rc<Vec<u64>>)>,
+    pub focus: FocusHandle,
+    /// (anchor, head) as (absolute line, char column).
+    pub sel: Option<((u64, usize), (u64, usize))>,
+    pub selecting: bool,
+    pub bounds: Option<gpui::Bounds<Pixels>>,
+    pub cell_w: Pixels,
+    pub failure: Entity<crate::selectable::SelectableText>,
 }
 
 // ---------------------------------------------------------------- sheets
@@ -472,6 +479,12 @@ impl Workspace {
                 hit: 0,
                 scroll: UniformListScrollHandle::new(),
                 cache: None,
+                focus: cx.focus_handle(),
+                sel: None,
+                selecting: false,
+                bounds: None,
+                cell_w: px(7.2),
+                failure: cx.new(crate::selectable::SelectableText::new),
             },
             recipe_ui: crate::recipe_tab::RecipeUi::default(),
             assistant: crate::assistant::AssistantUi::new(cx),
@@ -524,6 +537,7 @@ impl Workspace {
         self.active = i;
         self.menu = None;
         self.log.filter_stage = None;
+        self.log.sel = None;
         self.log.cache = None;
         self.compare_with = None;
         let Some(i) = i else {
@@ -732,6 +746,7 @@ impl Workspace {
         let record = b.record.clone();
         self.selected_build.insert(pid.clone(), build_id.to_string());
         self.log.filter_stage = None;
+        self.log.sel = None;
         self.log.cache = None;
         self.compare_with = None;
         let events = dir.join("events.jsonl");
@@ -891,6 +906,7 @@ impl Workspace {
         });
         self.selected_build.remove(&project_id);
         self.log.filter_stage = None;
+        self.log.sel = None;
         self.log.follow = true;
         self.log.cache = None;
         if self.active().is_some_and(|p| p.id() == project_id) && self.tab != Tab::Files {

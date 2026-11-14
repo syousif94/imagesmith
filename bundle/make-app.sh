@@ -45,12 +45,12 @@ cp -R builder/fsctl/src "$APP/Contents/Resources/builder/fsctl/src"
 echo "==> icon"
 ICON_TMP=$(mktemp -d)
 trap 'rm -rf "$ICON_TMP"' EXIT
-swift bundle/make-icon.swift "$ICON_TMP/icon.png"
+ICON_SRC=docs/icon.png
 ICONSET=$ICON_TMP/AppIcon.iconset
 mkdir -p "$ICONSET"
 for s in 16 32 128 256 512; do
-    sips -z $s $s "$ICON_TMP/icon.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-    sips -z $((s * 2)) $((s * 2)) "$ICON_TMP/icon.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+    sips -z $s $s "$ICON_SRC" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+    sips -z $((s * 2)) $((s * 2)) "$ICON_SRC" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 

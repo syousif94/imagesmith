@@ -355,12 +355,13 @@ impl Render for SettingsView {
                         update_settings(cx, |s| s.ai_provider = [AiProvider::OpenRouter, AiProvider::LmStudio][i]);
                         crate::model_picker::fetch_models(false, cx);
                     })))
-                    .when(!lm, |d| {
+                    .when(!lm || s.web_search == WebSearch::OpenRouter, |d| {
                         d.child(
                             row("OpenRouter API key")
                                 .child(div().flex_1().min_w(px(200.)).child(self.api_key.clone()))
                                 .child(button("get-key", "Get a Key…", Kind::Normal, true, &c).on_click(|_, _, cx| cx.open_url("https://openrouter.ai/keys"))),
                         )
+                        .child(row("").child(div().text_size(px(12.)).text_color(c.muted).child("Used for both OpenRouter models and OpenRouter web search.")))
                     })
                     .when(lm, |d| {
                         d.child(
@@ -393,13 +394,6 @@ impl Render for SettingsView {
                             row("LangSearch API key")
                                 .child(div().flex_1().min_w(px(200.)).child(self.langsearch_key.clone()))
                                 .child(button("ls-key", "Get a Key…", Kind::Normal, true, &c).on_click(|_, _, cx| cx.open_url("https://langsearch.com/dashboard"))),
-                        )
-                    })
-                    .when(s.web_search == WebSearch::OpenRouter && lm, |d| {
-                        d.child(
-                            row("OpenRouter API key")
-                                .child(div().flex_1().min_w(px(200.)).child(self.api_key.clone()))
-                                .child(button("get-key", "Get a Key…", Kind::Normal, true, &c).on_click(|_, _, cx| cx.open_url("https://openrouter.ai/keys"))),
                         )
                     })
                     .child(row("").child(div().text_size(px(12.)).text_color(c.muted).child(match s.web_search {

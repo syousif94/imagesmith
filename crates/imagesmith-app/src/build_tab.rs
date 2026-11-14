@@ -1,10 +1,14 @@
 //! Build tab: stage list on the left, virtualized log on the right.
 
+use crate::selectable::Span;
 use crate::theme::{Colors, MONO};
 use crate::widgets::{button, fmt_ms, progress_bar, strip_ansi, ClickIf, Kind};
 use crate::workspace::{Tab, Workspace};
 use gpui::prelude::*;
-use gpui::{div, px, uniform_list, AnyElement, Context, ScrollStrategy, ScrollWheelEvent, SharedString, Window};
+use gpui::{
+    canvas, div, px, uniform_list, AnyElement, Context, CursorStyle, DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Point, ScrollStrategy, ScrollWheelEvent, SharedString, Window,
+};
 use imagesmith_core::size::human;
 use imagesmith_core::tracker::{looks_like_error, BuildState, StageStatus, STAGES};
 use std::collections::HashSet;
@@ -197,7 +201,9 @@ impl Workspace {
         div().id("stages").w(px(280.)).flex_none().h_full().border_r_1().border_color(c.border).overflow_y_scroll().child(col).into_any_element()
     }
 
-    fn render_log(&mut self, c: &Colors, cx: &mut Context<Self>) -> AnyElement {
+    fn render_log(&mut self, c: &Colors, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let font_id = window.text_system().resolve_font(&gpui::font(MONO));
+        self.log.cell_w = window.text_system().advance(font_id, px(12.), 'm').map(|s| s.width).unwrap_or(px(7.2));
         let n = self.visible_log_len();
         let colors = *c;
         let follow = self.log.follow;
@@ -260,7 +266,7 @@ impl Workspace {
                 }
                 cx.notify();
             })))
-            .child(button("copy-log", "Copy", Kind::Ghost, n > 0, c).on_click_if(n > 0, cx.listener(|this, _, _, cx| {
+            .child(button("copy-log", "Copy", Kind::Ghost, n > 0, c).tooltip(crate::widgets::tooltip("Copy the whole log; select text and use ⌘C for part of it")).on_click_if(n > 0, cx.listener(|this, _, _, cx| {
                 let text = this.log_text();
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 this.toast("Log copied", cx);
@@ -274,10 +280,19 @@ impl Workspace {
             n,
             cx.processor(move |this: &mut Workspace, range: std::ops::Range<usize>, _window, _cx| {
                 let c = colors;
+                let sel = this.log_sel_range();
+                let cw = this.log.cell_w;
                 range
                     .filter_map(|ix| {
-                        let (_, raw, _) = this.line_at(ix)?;
+                        let (abs, raw, _) = this.line_at(ix)?;
                         let text = strip_ansi(&raw);
+                        let hl = sel.filter(|(s, e)| abs >= s.0 && abs <= e.0).map(|(s, e)| {
+                            let len = text.chars().count();
+                            let a = if abs == s.0 { s.1.min(len) } else { 0 };
+                            let b = if abs == e.0 { e.1.min(len) } else { len + 1 };
+                            (a, b)
+                        });
+                        let hl = hl.filter(|(a, b)| b > a);
                         let is_sep = text.starts_with("── ") && text.ends_with(" ──");
                         let color = if text.starts_with("warning:") {
                             c.warning
@@ -297,16 +312,21 @@ impl Workspace {
                                 .h(px(18.))
                                 .px(px(10.))
                                 .text_color(c.muted)
+                                .when(hl.is_some(), |d| d.bg(c.accent_soft))
                                 .child(div().w(px(16.)).h(px(1.)).bg(c.border))
                                 .child(SharedString::from(text.trim_matches(|ch| ch == '─' || ch == ' ').to_string()))
                                 .child(div().flex_1().h(px(1.)).bg(c.border))
                         } else {
                             div()
+                                .relative()
                                 .h(px(18.))
                                 .px(px(10.))
                                 .whitespace_nowrap()
                                 .text_color(color)
                                 .when(matched, |d| d.bg(if ix == hit { c.warning_soft } else { c.info_soft }))
+                                .children(hl.map(|(a, b)| {
+                                    div().absolute().top_0().h(px(18.)).left(px(10.) + cw * a as f32).w(cw * (b - a) as f32).bg(c.accent_soft)
+                                }))
                                 .child(SharedString::from(text))
                         };
                         Some(el)
@@ -333,6 +353,53 @@ impl Workspace {
             }
         }));
 
+        let ws = cx.entity();
+        let ws2 = cx.entity();
+        let area = div()
+            .id("log-area")
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .key_context("Selectable")
+            .track_focus(&self.log.focus)
+            .cursor(CursorStyle::IBeam)
+            .on_action(cx.listener(|this, _: &crate::text_input::Copy, _, cx| {
+                if let Some(t) = this.log_selection_text() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(t));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &crate::text_input::SelectAll, _, cx| {
+                let n = this.visible_log_len();
+                if let (Some((a, _, _)), Some((b, _, _))) = (this.line_at(0), this.line_at(n.saturating_sub(1))) {
+                    this.log.sel = Some(((a, 0), (b, usize::MAX)));
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, w, cx| this.log_mouse_down(e, w, cx)))
+            .child(list)
+            .child(
+                canvas(
+                    move |bounds, _, cx| ws.update(cx, |this, _| this.log.bounds = Some(bounds)),
+                    move |_, _, window, _| {
+                        // Drag and release may happen outside the log, so listen window-wide.
+                        let ws = ws2.clone();
+                        window.on_mouse_event(move |e: &MouseMoveEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Bubble {
+                                ws.update(cx, |this, cx| this.log_drag(e.position, cx));
+                            }
+                        });
+                        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                            if phase == DispatchPhase::Bubble {
+                                ws2.update(cx, |this, _| this.log.selecting = false);
+                            }
+                        });
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
         div()
             .flex()
             .flex_col()
@@ -343,9 +410,103 @@ impl Workspace {
             .child(if n == 0 {
                 div().flex_1().flex().items_center().justify_center().text_color(c.faint).bg(c.log_bg).child("No log output").into_any_element()
             } else {
-                list.into_any_element()
+                area.into_any_element()
             })
             .into_any_element()
+    }
+
+    fn log_sel_range(&self) -> Option<((u64, usize), (u64, usize))> {
+        let (a, b) = self.log.sel?;
+        let (s, e) = if a <= b { (a, b) } else { (b, a) };
+        (s != e).then_some((s, e))
+    }
+
+    /// Log position (absolute line, char column) under a window point, clamped to the log.
+    fn log_pos(&mut self, p: Point<Pixels>) -> Option<(u64, usize)> {
+        let b = self.log.bounds?;
+        let n = self.visible_log_len();
+        if n == 0 {
+            return None;
+        }
+        let off = self.log.scroll.0.borrow().base_handle.offset();
+        let row = ((p.y - b.top() - off.y) / px(18.)).floor();
+        let (abs, raw, _) = self.line_at((row.max(0.) as usize).min(n - 1))?;
+        let len = strip_ansi(&raw).chars().count();
+        let col = if row < 0. {
+            0
+        } else if row as usize >= n {
+            len
+        } else {
+            ((p.x - b.left() - px(10.) - off.x) / self.log.cell_w).round().max(0.) as usize
+        };
+        Some((abs, col.min(len)))
+    }
+
+    fn log_mouse_down(&mut self, e: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.log.focus);
+        let Some(p) = self.log_pos(e.position) else { return };
+        match e.click_count {
+            2 => {
+                let text = self.current_view().and_then(|v| v.tracker.log.lines.get((p.0 - v.tracker.log.first) as usize)).map(|l| strip_ansi(&l.text));
+                let chars: Vec<char> = text.unwrap_or_default().chars().collect();
+                let word = |ch: &char| ch.is_alphanumeric() || *ch == '_';
+                let (mut a, mut b) = (p.1, p.1);
+                if chars.get(p.1).is_some_and(word) {
+                    while a > 0 && word(&chars[a - 1]) {
+                        a -= 1;
+                    }
+                    while b < chars.len() && word(&chars[b]) {
+                        b += 1;
+                    }
+                } else {
+                    b = (b + 1).min(chars.len());
+                }
+                self.log.sel = Some(((p.0, a), (p.0, b)));
+            }
+            n if n >= 3 => self.log.sel = Some(((p.0, 0), (p.0, usize::MAX))),
+            _ => {
+                let anchor = match self.log.sel {
+                    Some((a, _)) if e.modifiers.shift => a,
+                    _ => p,
+                };
+                self.log.sel = Some((anchor, p));
+                self.log.selecting = true;
+            }
+        }
+        cx.notify();
+    }
+
+    fn log_drag(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
+        if !self.log.selecting {
+            return;
+        }
+        let (Some(head), Some(b)) = (self.log_pos(p), self.log.bounds) else { return };
+        if let Some((anchor, _)) = self.log.sel {
+            self.log.sel = Some((anchor, head));
+        }
+        if p.y < b.top() || p.y > b.bottom() {
+            self.log.follow = false;
+            let ix = self.visible_index_of(head.0);
+            self.log.scroll.scroll_to_item(ix, if p.y < b.top() { ScrollStrategy::Top } else { ScrollStrategy::Bottom });
+        }
+        cx.notify();
+    }
+
+    /// The selected part of the log, if any.
+    pub fn log_selection_text(&mut self) -> Option<String> {
+        let (s, e) = self.log_sel_range()?;
+        let (i0, i1) = (self.visible_index_of(s.0), self.visible_index_of(e.0));
+        let mut out = Vec::new();
+        for ix in i0..=i1 {
+            let Some((abs, raw, _)) = self.line_at(ix) else { break };
+            if abs > e.0 {
+                break;
+            }
+            let a = if abs == s.0 { s.1 } else { 0 };
+            let b = if abs == e.0 { e.1 } else { usize::MAX };
+            out.push(strip_ansi(&raw).chars().skip(a).take(b.saturating_sub(a)).collect::<String>());
+        }
+        Some(out.join("\n"))
     }
 
     pub fn log_text(&mut self) -> String {
@@ -479,6 +640,11 @@ impl Workspace {
             Some(s) if s.starts_with("step") || s.starts_with("first") => "steps",
             _ => "image",
         };
+        let mut spans = vec![Span { text: message, color: c.text, bold: true }];
+        spans.extend(hint.map(|h| Span { text: h, color: c.muted, bold: false }));
+        spans.extend(diags.into_iter().map(|d| Span { text: format!("• {d}"), color: c.text, bold: false }));
+        let text = self.log.failure.clone();
+        text.update(cx, |t, cx| t.set_spans(spans, cx));
         Some(
             div()
                 .flex()
@@ -492,16 +658,7 @@ impl Workspace {
                 .border_color(c.danger.opacity(0.5))
                 .bg(c.danger_soft)
                 .child(div().text_color(c.danger).child("✗"))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .gap(px(3.))
-                        .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(message))
-                        .children(hint.map(|h| div().text_size(px(12.)).text_color(c.muted).child(h)))
-                        .children(diags.into_iter().map(|d| div().text_size(px(12.)).child(format!("• {d}")))),
-                )
+                .child(div().flex_1().min_w_0().child(text))
                 .child(button("fail-copy", "Copy", Kind::Normal, true, c).tooltip(crate::widgets::tooltip("Copy the error and the end of the log")).on_click(cx.listener(|this, _, _, cx| {
                     if let Some(r) = this.failure_report() {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(r));
@@ -527,7 +684,7 @@ impl Workspace {
         )
     }
 
-    pub fn render_build_tab(&mut self, c: &Colors, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_build_tab(&mut self, c: &Colors, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.current_view().is_none() {
             let p = self.active();
             let can = p.is_some_and(|p| p.can_build());
@@ -555,7 +712,7 @@ impl Workspace {
         let header = self.render_header(c);
         let failure = self.render_failure(c, cx);
         let stages = self.render_stage_list(c, cx);
-        let log = self.render_log(c, cx);
+        let log = self.render_log(c, window, cx);
         div()
             .flex()
             .flex_col()

@@ -672,7 +672,7 @@ impl Render for TextInput {
 }
 
 /// Position of byte `off` relative to the unscrolled text origin.
-fn position_in(lines: &[(usize, Pixels, WrappedLine)], off: usize, lh: Pixels, len: usize) -> Point<Pixels> {
+pub(crate) fn position_in(lines: &[(usize, Pixels, WrappedLine)], off: usize, lh: Pixels, len: usize) -> Point<Pixels> {
     for (start, y, line) in lines {
         if off >= *start && off <= start + line.len() {
             if let Some(p) = line.position_for_index(off - start, lh) {
@@ -686,7 +686,7 @@ fn position_in(lines: &[(usize, Pixels, WrappedLine)], off: usize, lh: Pixels, l
     }
 }
 
-fn index_in(lines: &[(usize, Pixels, WrappedLine)], p: Point<Pixels>, lh: Pixels) -> usize {
+pub(crate) fn index_in(lines: &[(usize, Pixels, WrappedLine)], p: Point<Pixels>, lh: Pixels) -> usize {
     for (i, (start, y, line)) in lines.iter().enumerate() {
         if p.y < *y + line.size(lh).height || i + 1 == lines.len() {
             let r = line.closest_index_for_position(point(p.x, (p.y - *y).max(px(0.))), lh);
@@ -726,8 +726,8 @@ impl WrappedTextElement {
     }
 }
 
-fn shape(window: &Window, text: &SharedString, run: &TextRun, font_size: Pixels, width: Pixels, lh: Pixels) -> (Vec<(usize, Pixels, WrappedLine)>, Pixels) {
-    let lines = window.text_system().shape_text(text.clone(), font_size, std::slice::from_ref(run), Some(width), None).unwrap_or_default();
+pub(crate) fn shape(window: &Window, text: &SharedString, runs: &[TextRun], font_size: Pixels, width: Pixels, lh: Pixels) -> (Vec<(usize, Pixels, WrappedLine)>, Pixels) {
+    let lines = window.text_system().shape_text(text.clone(), font_size, runs, Some(width), None).unwrap_or_default();
     let (mut out, mut start, mut y) = (Vec::new(), 0, px(0.));
     for l in lines {
         let h = l.size(lh).height;
@@ -763,7 +763,7 @@ impl Element for WrappedTextElement {
                 _ => None,
             });
             let h = match width {
-                Some(w) => shape(window, &text, &run, font_size, w, lh).1,
+                Some(w) => shape(window, &text, std::slice::from_ref(&run), font_size, w, lh).1,
                 None => lh,
             };
             size(width.unwrap_or(px(100.)), h.min(lh * max as f32))
@@ -782,7 +782,7 @@ impl Element for WrappedTextElement {
     ) -> WrappedPrepaint {
         let (text, run, font_size) = self.display(window, cx);
         let lh = window.line_height();
-        let (lines, total) = shape(window, &text, &run, font_size, bounds.size.width, lh);
+        let (lines, total) = shape(window, &text, std::slice::from_ref(&run), font_size, bounds.size.width, lh);
         let input = self.input.read(cx);
         let empty = input.content.is_empty();
         let pos = |o: usize| if empty { point(px(0.), px(0.)) } else { position_in(&lines, o, lh, input.content.len()) };

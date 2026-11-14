@@ -44,7 +44,6 @@ sed -i '' "s/^version = \"$OLD_VERSION\"/version = \"$VERSION\"/" Cargo.toml
 cargo update --workspace --quiet
 
 echo "==> site"
-[ -f docs/icon.png ] || swift bundle/make-icon.swift docs/icon.png
 sed -i '' "s#data-repo=\"[^\"]*\"#data-repo=\"$REPO\"#" docs/index.html
 
 echo "==> commit"
